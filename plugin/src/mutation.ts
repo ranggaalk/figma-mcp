@@ -4,6 +4,7 @@
 import { errorMessage, withTimeout } from "./util";
 
 const ROLLBACK_MARKER_KEY = "mcpBridgeRollback";
+const DEFAULT_TIMEOUT_MS = 30000;
 
 /** Thrown when work failed and its changes were rolled back. */
 export class RolledBackError extends Error {}
@@ -39,8 +40,11 @@ let queue: Promise<unknown> = Promise.resolve();
  * Runs `work` after any mutation already in progress. Read-only commands do
  * not go through here, so they stay responsive while a mutation runs.
  */
-export function runMutation<T>(work: () => Promise<T>, timeoutMs: number): Promise<T> {
-  const run = queue.then(() => mutate(work, timeoutMs));
+export function runMutation<T>(work: () => Promise<T>, timeoutMs: number | undefined): Promise<T> {
+  // Older servers do not send a time limit; without this default every
+  // mutation would time out at once.
+  const limit = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
+  const run = queue.then(() => mutate(work, limit));
   // A failed or timed-out mutation must not block the ones behind it.
   queue = run.catch(() => undefined);
   return run;

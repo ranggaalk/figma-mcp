@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
-import { connectPlugin, jsonOf, startServer, textOf } from "./helpers.mjs";
+import { connectPlugin, jsonOf, ROOT, startServer, textOf } from "./helpers.mjs";
 import { createMockFigma } from "./mock-figma.mjs";
 
 const PORT = 3903;
@@ -104,6 +104,33 @@ test("mutations run one at a time and never interleave", async () => {
   const order = names();
   assert.equal(order.length, 3);
   assert.equal(order.indexOf("slow-b"), order.indexOf("slow-a") + 1, `interleaved: ${order}`);
+});
+
+test("commands from an older server without a time limit still run", async () => {
+  // Stand-in for an older server: it sends execute_code without timeoutMs.
+  const { WebSocketServer } = await import("ws");
+  const { compileSnippet } = await import(ROOT + "dist/compile.js");
+  const wss = new WebSocketServer({ port: PORT + 50, host: "127.0.0.1" });
+  const oldFigma = createMockFigma();
+  const connected = new Promise((resolve) => wss.once("connection", resolve));
+  const old = await connectPlugin({ port: PORT + 50, figma: oldFigma });
+  const socket = await connected;
+  try {
+    const compiled = await compileSnippet('await new Promise((r) => setTimeout(r, 30)); figma.createRectangle().name = "late"; return "ok";');
+    const reply = await new Promise((resolve) => {
+      socket.on("message", (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.id === "old-1") resolve(msg);
+      });
+      socket.send(JSON.stringify({ type: "command", id: "old-1", command: "execute_code", params: { compiled } }));
+    });
+    assert.equal(reply.ok, true, JSON.stringify(reply));
+    assert.equal(reply.result.result, "ok");
+    assert.deepEqual(oldFigma.currentPage.children.map((n) => n.name), ["late"]);
+  } finally {
+    await old.close();
+    wss.close();
+  }
 });
 
 test("save_checkpoint saves a named version", async () => {
