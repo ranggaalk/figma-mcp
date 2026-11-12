@@ -551,6 +551,15 @@ export function createMockFigma(options = {}) {
     get description() {
       return this._p.description ?? "";
     },
+    set description(value) {
+      set(this, "description", value);
+    },
+    addComponentProperty(name, type, defaultValue) {
+      if (type === "VARIANT") throw new Error("in addComponentProperty: variant properties come from variant names");
+      const fullName = `${name}#${counter++}:0`;
+      set(this, "defs", { ...(this._p.defs ?? {}), [fullName]: { type, defaultValue } });
+      return fullName;
+    },
     get defaultVariant() {
       return this._children[0];
     },
@@ -1119,6 +1128,16 @@ export function createMockFigma(options = {}) {
       defaultModeId: modeId,
       remote: false,
       ...props,
+      renameMode(id, newName) {
+        const mode = this.modes.find((m) => m.modeId === id);
+        if (!mode) throw new Error(`in renameMode: no mode ${id}`);
+        mode.name = newName;
+      },
+      addMode(modeName) {
+        const id = `${counter++}:0`;
+        this.modes.push({ modeId: id, name: modeName });
+        return id;
+      },
       remove() {
         collections.delete(this.id);
       },
@@ -1341,6 +1360,9 @@ export function createMockFigma(options = {}) {
           return variable;
         }
         throw new Error(`in importVariableByKeyAsync: Could not find a published variable with key "${key}"`);
+      },
+      createVariableAlias(variable) {
+        return { type: "VARIABLE_ALIAS", id: variable.id };
       },
       setBoundVariableForPaint(paint, field, variable) {
         if (field !== "color") throw new Error("in setBoundVariableForPaint: only color is supported");

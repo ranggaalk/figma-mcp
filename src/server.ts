@@ -6,6 +6,7 @@ import { FigmaBridge } from "./bridge.js";
 import { catalogStyles, saveCatalog, searchCatalogComponents } from "./catalog.js";
 import { compileSnippet } from "./compile.js";
 import { readImageFile } from "./images.js";
+import { loadSkills, type Skill } from "./skills.js";
 import {
   BUILD_TIMEOUT_MS,
   DEFAULT_PORT,
@@ -96,6 +97,7 @@ const server = new McpServer(
       "Reuse the file's design system instead of hard-coding values: get_styles lists styles and variables, get_components lists components. In specs, bind colors and spacing with { \"variable\": \"name\" } or { \"style\": \"name\" }, text with textStyle, and place components with type \"instance\".",
       "Before changing a design that already existed (not one you just created), call save_checkpoint so the user can restore it from Figma's version history.",
       "Every call that changes the document is one undo step for the user, and is rolled back automatically if it fails.",
+      "Design know-how ships with this server as skills (get_skill): read design-direction before designing a new screen, design-system before creating tokens or components, accessibility for interactive screens and reviews, ux-writing for interface text.",
       'If a tool reports that the plugin is not connected, ask the user to run Plugins → Development → "Figma MCP Bridge" in the Figma desktop app.',
     ].join("\n"),
   },
@@ -526,6 +528,159 @@ server.registerTool(
       textResult(await bridge.request("save_checkpoint", { title, description }, 60_000 + PLUGIN_TIMEOUT_MARGIN_MS)),
     ),
 );
+
+// ------------------------------------------------------------------ skills
+
+const skills = loadSkills();
+const skillByName = new Map(skills.map((skill) => [skill.name, skill]));
+
+function skillText(name: string): string {
+  const skill = skillByName.get(name);
+  return skill ? skill.body : `(The ${name} skill is not installed with this server.)`;
+}
+
+function promptResult(description: string, text: string) {
+  return { description, messages: [{ role: "user" as const, content: { type: "text" as const, text } }] };
+}
+
+if (skills.length > 0) {
+  const names = skills.map((skill) => skill.name) as [string, ...string[]];
+
+  server.registerTool(
+    "get_skill",
+    {
+      title: "Read a design skill",
+      description: [
+        "Design know-how written for this bridge, in Markdown. Call without a name to list the skills; call with a name to read one before starting that kind of work:",
+        ...skills.map((skill) => `- ${skill.name}: ${skill.description}`),
+      ].join("\n"),
+      inputSchema: { name: z.enum(names).optional().describe("Skill to read. Leave out to list them.") },
+      annotations: { readOnlyHint: true },
+    },
+    ({ name }) =>
+      guarded(async () => {
+        if (!name) return textResult({ skills: skills.map(({ name, description, uri }) => ({ name, description, uri })) });
+        return { content: [{ type: "text", text: skillText(name) }] };
+      }),
+  );
+
+  for (const skill of skills) {
+    server.registerResource(
+      `skill-${skill.name}`,
+      skill.uri,
+      { title: `Skill: ${skill.name}`, description: skill.description, mimeType: "text/markdown" },
+      async (uri) => ({ contents: [{ uri: uri.href, mimeType: "text/markdown", text: skill.body }] }),
+    );
+  }
+
+  const target = (nodeId: string | undefined) =>
+    nodeId ? `the node ${nodeId}` : "the frame selected in Figma (ask the user to select one if nothing is selected)";
+
+  server.registerPrompt(
+    "design_screen",
+    {
+      title: "Design a screen",
+      description: "Design a new screen or section in the open Figma file, using the file's design system, then review it.",
+      argsSchema: {
+        brief: z.string().describe("What to design: purpose, audience, content, constraints."),
+        platform: z.string().optional().describe('For example "desktop 1440", "mobile 390".'),
+      },
+    },
+    ({ brief, platform }) =>
+      promptResult(
+        "Design a screen",
+        [
+          "Design this in the Figma file that is open through figma-bridge:",
+          "",
+          brief,
+          platform ? `\nPlatform: ${platform}` : "",
+          "",
+          "Follow the design-direction skill below: understand the job, read the file's design system, write a short plan, build with build_design using the file's variables, styles and components, then review the screenshot and the check results and fix what is off.",
+          "Apply the accessibility and ux-writing skills to what you build (read them with get_skill).",
+          "Finish by reporting what you built (frame name and id), the main decisions, your assumptions, and anything you could not verify.",
+          "",
+          "---",
+          "",
+          skillText("design-direction"),
+        ].join("\n"),
+      ),
+  );
+
+  server.registerPrompt(
+    "audit_design",
+    {
+      title: "Audit a design",
+      description: "Review a frame for accessibility, copy and design-system consistency, without changing it.",
+      argsSchema: {
+        nodeId: z.string().optional().describe("Frame to review. Default: the current selection."),
+        focus: z.string().optional().describe('Narrow the review, for example "accessibility" or "copy".'),
+      },
+    },
+    ({ nodeId, focus }) =>
+      promptResult(
+        "Audit a design",
+        [
+          `Review ${target(nodeId)} in the open Figma file. This is read-only: do not change anything.`,
+          focus ? `Focus on: ${focus}.` : "Cover accessibility, interface copy (get_skill ux-writing) and consistency with the file's design system (unlinked tokens, hard-coded values, components that should have been used).",
+          "Use check_design first, then find_nodes, get_node and get_components for what it does not cover, and export_node to look at it if the Figma window is visible.",
+          "Report findings in a table ordered by severity, with node ids, layer paths and concrete fixes. Then ask which ones to fix.",
+          "",
+          "---",
+          "",
+          skillText("accessibility"),
+        ].join("\n"),
+      ),
+  );
+
+  server.registerPrompt(
+    "setup_design_system",
+    {
+      title: "Set up a design system",
+      description: "Create or extend variables, styles and components in the open Figma file.",
+      argsSchema: {
+        brief: z.string().optional().describe("Brand colours, fonts, the components needed, or what to extend."),
+      },
+    },
+    ({ brief }) =>
+      promptResult(
+        "Set up a design system",
+        [
+          "Set up or extend the design system in the Figma file that is open through figma-bridge.",
+          brief ? `\nBrief: ${brief}\n` : "",
+          "Start by reading what already exists (get_styles, get_components) and summarise it with your plan: collections and modes, token names, text and effect styles, components and their variants. If the brief leaves major choices open, ask before creating; otherwise go ahead, following the skill below, and verify the result with get_styles and get_components.",
+          "",
+          "---",
+          "",
+          skillText("design-system"),
+        ].join("\n"),
+      ),
+  );
+
+  server.registerPrompt(
+    "review_copy",
+    {
+      title: "Review interface copy",
+      description: "Review and improve the text in a frame; changes are proposed first and applied only after approval.",
+      argsSchema: {
+        nodeId: z.string().optional().describe("Frame whose text to review. Default: the current selection."),
+        language: z.string().optional().describe('Language and tone, for example "Indonesian, informal (kamu)".'),
+      },
+    },
+    ({ nodeId, language }) =>
+      promptResult(
+        "Review interface copy",
+        [
+          `Review the interface text in ${target(nodeId)}.`,
+          language ? `Language and tone: ${language}.` : "Keep the language the design already uses.",
+          "List every text with find_nodes, then propose changes as a table (where, current, proposed, why), following the skill below. Do not change anything until the user approves; then apply with update_nodes and check the result.",
+          "",
+          "---",
+          "",
+          skillText("ux-writing"),
+        ].join("\n"),
+      ),
+  );
+}
 
 bridge.start();
 await server.connect(new StdioServerTransport());

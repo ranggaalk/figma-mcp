@@ -59,6 +59,7 @@ Kalau versi plugin dan server berbeda, setiap tool menampilkan peringatan.
 | Memeriksa | `check_design` | Temukan teks terpotong, konten terpotong, ukuran bawaan 100px, kontras rendah, warna di luar token, dan lainnya |
 | | `export_node` | Render node ke PNG supaya agent bisa melihat hasilnya |
 | Keamanan | `save_checkpoint` | Simpan versi bernama ke version history file |
+| Pengetahuan | `get_skill` | Baca skill desain bawaan (lihat di bawah) |
 
 `build_design`, `update_nodes`, `place_image`, dan `execute_code` menerima `screenshot: true` untuk langsung mengembalikan PNG hasilnya.
 
@@ -112,6 +113,34 @@ Plugin API tidak bisa melihat isi library, tapi bisa mengimpor berdasarkan key.
   Hanya item yang sudah dipublish yang bisa diimpor.
 - **Komponen library yang sudah dipakai di file** langsung terdeteksi dari instance-nya.
 
+### Skill bawaan
+
+Server membawa pengetahuan desain dalam bentuk skill (`skills/<nama>/SKILL.md`), ditulis khusus untuk tool di bridge ini:
+
+| Skill | Isi |
+| --- | --- |
+| `design-direction` | Merancang layar: pahami tugasnya, baca design system file, rencanakan, bangun dengan `build_design`, lalu tinjau. Termasuk daftar kebiasaan yang membuat desain terlihat generik |
+| `design-system` | Menyusun variable (primitives → semantic dengan mode Light/Dark, spacing, radius), text/effect style, dan komponen dengan variant dan properti, beserta resep `execute_code` |
+| `accessibility` | WCAG 2.2 AA saat mendesain: kontras, ukuran teks dan target, state fokus/error, warna bukan satu-satunya penanda, catatan handoff, dan cara audit tanpa mengedit |
+| `ux-writing` | Teks antarmuka: tombol, label, error, empty state, konfirmasi, format angka/tanggal Indonesia dan Inggris, dan pola yang terdengar seperti tulisan mesin |
+
+Skill tersedia lewat tiga jalur:
+
+- **Tool `get_skill`:** agent membacanya sendiri sebelum mulai. Instruksi server mengarahkan agent ke skill yang sesuai.
+- **Resource MCP:** `skill://figma-bridge/<nama>`, bisa dilampirkan manual.
+- **Prompt MCP:** perintah siap pakai yang menyertakan skill terkait.
+
+| Prompt | Fungsi |
+| --- | --- |
+| `design_screen` | Rancang layar dari brief (argumen `brief`, opsional `platform`) |
+| `audit_design` | Tinjau frame tanpa mengedit: aksesibilitas, copy, konsistensi token |
+| `setup_design_system` | Buat atau perluas variable, style, dan komponen |
+| `review_copy` | Usulkan perbaikan teks; diterapkan setelah disetujui |
+
+Di Claude Code, prompt muncul sebagai perintah `/mcp__figma-bridge__design_screen` dan seterusnya. Di Claude Desktop, prompt ada di menu lampiran (+) bagian figma-bridge.
+
+Teks skill ditulis untuk project ini. Sumber ide dan lisensinya tercantum di `skills/NOTICE.md`.
+
 ### Pemeriksaan desain
 
 `check_design` memeriksa sebuah frame beserta isinya. Setiap temuan menyebut id node, jalur layer, dan saran perbaikan.
@@ -163,6 +192,7 @@ Tes menjalankan MCP client sungguhan → `dist/server.js` → WebSocket → `plu
 | Plugin: pencarian variable/style/komponen | `plugin/src/library.ts` |
 | Plugin: pemeriksaan | `plugin/src/checks.ts` |
 | Plugin: undo dan rollback | `plugin/src/mutation.ts` |
+| Skill bawaan (dimuat oleh `src/skills.ts`) | `skills/` |
 
 ## Batasan
 
