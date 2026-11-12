@@ -1,13 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
-
-/** Sent by the plugin right after it connects, and again when the page changes. */
-export interface PluginHello {
-  fileName: string;
-  pageName: string;
-  editorType: string;
-  pluginVersion: string;
-}
+import { PLUGIN_VERSION, type CommandName, type CommandParams, type PluginHello } from "./protocol.js";
 
 interface PluginConnection {
   socket: WebSocket;
@@ -17,6 +10,7 @@ interface PluginConnection {
 
 interface PendingRequest {
   socket: WebSocket;
+  command: string;
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: NodeJS.Timeout;
@@ -24,6 +18,10 @@ interface PendingRequest {
 
 const LISTEN_RETRY_MS = 3000;
 const HEARTBEAT_MS = 30000;
+
+const RERUN_PLUGIN =
+  'Ask the user to close the plugin window in Figma and run Plugins → Development → "Figma MCP Bridge" again ' +
+  "(and to copy the rebuilt plugin files again if they import the plugin from a Windows folder).";
 
 // stdout carries the MCP stdio protocol, so all logging goes to stderr.
 const log = (...args: unknown[]) => console.error("[figma-bridge]", ...args);
@@ -116,6 +114,9 @@ export class FigmaBridge {
       }
       if (msg?.type === "hello") {
         connection.hello = msg.info;
+        if (msg.info?.pluginVersion !== PLUGIN_VERSION) {
+          log(`plugin version ${msg.info?.pluginVersion} does not match server version ${PLUGIN_VERSION}`);
+        }
         return;
       }
       const request = typeof msg?.id === "string" ? this.pending.get(msg.id) : undefined;
@@ -123,7 +124,7 @@ export class FigmaBridge {
       this.pending.delete(msg.id);
       clearTimeout(request.timer);
       if (msg.ok) request.resolve(msg.result);
-      else request.reject(new Error(String(msg.error ?? "Unknown error in the Figma plugin")));
+      else request.reject(new Error(this.explainError(String(msg.error ?? "Unknown error in the Figma plugin"), request)));
     });
 
     socket.on("error", (err) => log("socket error:", err.message));
@@ -145,6 +146,15 @@ export class FigmaBridge {
     });
   }
 
+  /** An old plugin does not know newer commands; say so instead of "Unknown command". */
+  private explainError(error: string, request: PendingRequest): string {
+    if (error.startsWith("Unknown command")) {
+      const version = this.connections.find((c) => c.socket === request.socket)?.hello?.pluginVersion ?? "unknown";
+      return `The Figma plugin is outdated (version ${version}, this server needs ${PLUGIN_VERSION}) and does not support "${request.command}". ${RERUN_PLUGIN}`;
+    }
+    return error;
+  }
+
   private heartbeat(): void {
     for (const connection of this.connections) {
       if (!connection.alive) {
@@ -160,10 +170,21 @@ export class FigmaBridge {
     return this.connections.length > 0;
   }
 
+  /** Warning text when the active plugin was built from a different version than this server. */
+  versionWarning(): string | undefined {
+    const hello = this.connections.at(-1)?.hello;
+    if (!hello || hello.pluginVersion === PLUGIN_VERSION) return undefined;
+    return (
+      `Warning: the Figma plugin is version ${hello.pluginVersion} but this MCP server is ${PLUGIN_VERSION}. ` +
+      `Newer tools and helpers may fail until the plugin is reloaded. ${RERUN_PLUGIN}`
+    );
+  }
+
   status() {
     return {
       listening: this.wss !== undefined,
       url: `ws://${this.host}:${this.port}`,
+      serverVersion: PLUGIN_VERSION,
       listenError: this.listenError,
       connections: this.connections.map((connection, index) => ({
         ...connection.hello,
@@ -181,7 +202,7 @@ export class FigmaBridge {
   }
 
   /** Send a command to the active plugin and wait for its reply. */
-  request(command: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+  request<K extends CommandName>(command: K, params: CommandParams[K], timeoutMs: number): Promise<unknown> {
     const connection = this.connections.at(-1);
     if (!connection) return Promise.reject(new Error(this.notConnectedMessage()));
 
@@ -196,7 +217,7 @@ export class FigmaBridge {
           ),
         );
       }, timeoutMs);
-      this.pending.set(id, { socket: connection.socket, resolve, reject, timer });
+      this.pending.set(id, { socket: connection.socket, command, resolve, reject, timer });
       connection.socket.send(JSON.stringify({ type: "command", id, command, params }), (err) => {
         if (!err) return;
         this.pending.delete(id);

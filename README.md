@@ -52,6 +52,16 @@ Kode untuk `execute_code` diturunkan ke ES2017 di server sebelum dikirim, jadi a
 - **"Port 3055 is already in use"**: ada sesi agent lain yang menjalankan server ini. Tutup salah satunya.
 - **Ganti port**: ubah di tiga tempat, yaitu env `FIGMA_BRIDGE_PORT`, `WS_URL` di `plugin/ui.html`, dan `devAllowedDomains` di `plugin/manifest.json`.
 
+## Pengembangan
+
+```bash
+npm test   # build, lalu tes end-to-end
+```
+
+Tes menjalankan MCP client sungguhan → `dist/server.js` → WebSocket → `plugin/code.js`, dengan API Figma tiruan di `test/mock-figma.mjs`. Mock itu meniru aturan Figma yang sering bikin error (font harus dimuat, `FILL`/`HUG` hanya di tempat yang valid, semantik undo).
+
+Versi plugin dan server didefinisikan di `src/protocol.ts`. Kalau versinya berbeda, setiap tool menambahkan peringatan supaya plugin dijalankan ulang.
+
 ## Batasan
 
 - Figma harus terbuka dan plugin harus berjalan; tidak bisa headless.

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { transform } from "esbuild";
 import { z } from "zod";
 import { FigmaBridge } from "./bridge.js";
+import { compileSnippet } from "./compile.js";
+import { DEFAULT_PORT, PLUGIN_VERSION, type ExportResult } from "./protocol.js";
 
-const PORT = Number(process.env.FIGMA_BRIDGE_PORT ?? 3055);
+const PORT = Number(process.env.FIGMA_BRIDGE_PORT ?? DEFAULT_PORT);
 const HOST = process.env.FIGMA_BRIDGE_HOST ?? "127.0.0.1";
 
 const READ_TIMEOUT_MS = 30_000;
@@ -20,23 +21,31 @@ type ToolResult = { content: Content[]; isError?: boolean };
 
 const bridge = new FigmaBridge(PORT, HOST);
 
-function textResult(value: unknown): ToolResult {
+function toText(value: unknown): string {
   let text = typeof value === "string" ? value : JSON.stringify(value);
   if (text.length > MAX_TEXT_CHARS) {
     text =
       text.slice(0, MAX_TEXT_CHARS) +
       `\n…[truncated: the full result was ${text.length} characters. Ask for a smaller depth or a more specific node.]`;
   }
-  return { content: [{ type: "text", text }] };
+  return text;
+}
+
+function textResult(value: unknown): ToolResult {
+  return { content: [{ type: "text", text: toText(value) }] };
 }
 
 async function guarded(run: () => Promise<ToolResult>): Promise<ToolResult> {
+  let result: ToolResult;
   try {
-    return await run();
+    result = await run();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
+    result = { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
   }
+  const warning = bridge.versionWarning();
+  if (warning) result.content.push({ type: "text", text: warning });
+  return result;
 }
 
 /** Accepts ids as they appear in Figma URLs (`12-34`) as well as API form (`12:34`). */
@@ -45,30 +54,8 @@ function normalizeNodeId(id: string): string {
   return /^\d+-\d+$/.test(trimmed) ? trimmed.replace("-", ":") : trimmed;
 }
 
-/**
- * Figma's plugin sandbox rejects some newer syntax (optional chaining, object
- * spread, …), so agent-written code is lowered to ES2017 before it is sent.
- * The TypeScript loader also strips any type annotations the agent adds.
- */
-async function compileSnippet(code: string): Promise<string> {
-  const wrapped = `var __figmaBridgeMain = async function (figma, console) {\n${code}\n};`;
-  try {
-    const { code: compiled } = await transform(wrapped, { loader: "ts", target: "es2017" });
-    return compiled;
-  } catch (err) {
-    const errors = (err as { errors?: Array<{ text: string; location?: { line: number; column: number } | null }> })
-      .errors;
-    if (!errors?.length) throw err;
-    const details = errors
-      // Line numbers are shifted by one because of the wrapper's first line.
-      .map((e) => (e.location ? `line ${e.location.line - 1}, column ${e.location.column}: ${e.text}` : e.text))
-      .join("\n");
-    throw new Error(`The code has a syntax error and was not run.\n${details}`);
-  }
-}
-
 const server = new McpServer(
-  { name: "figma-bridge", version: "0.1.0" },
+  { name: "figma-bridge", version: PLUGIN_VERSION },
   {
     instructions: [
       "Reads and edits the Figma file the user currently has open, through a local plugin (no Figma REST API).",
@@ -184,10 +171,11 @@ server.registerTool(
   ({ nodeId, scale, maxSize }) =>
     guarded(async () => {
       const params = { nodeId: nodeId ? normalizeNodeId(nodeId) : undefined, scale, maxSize };
-      const { base64, mimeType, ...info } = (await bridge.request("export_node", params, EXPORT_TIMEOUT_MS)) as {
-        base64: string;
-        mimeType: string;
-      };
+      const { base64, mimeType, ...info } = (await bridge.request(
+        "export_node",
+        params,
+        EXPORT_TIMEOUT_MS,
+      )) as ExportResult;
       return {
         content: [
           { type: "image", data: base64, mimeType },
