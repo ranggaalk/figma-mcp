@@ -5,6 +5,7 @@
 import { PLUGIN_VERSION, type CommandMessage, type CommandName, type CommandParams } from "../../src/protocol";
 import { executeCode } from "./execute";
 import { exportNode, isWindowHidden, setWindowHidden } from "./export";
+import { runMutation } from "./mutation";
 import { MAX_CHILDREN, serializeEffect, serializeNode, serializePaints, serializeVariableValue, summarize } from "./serialize";
 import { clampDepth, errorMessage, requireNode, type Json } from "./util";
 
@@ -68,8 +69,24 @@ const handlers: Handlers = {
   get_node: async (params) => serializeNode(await requireNode(params.nodeId), clampDepth(params.depth)),
   get_styles: getStyles,
   export_node: exportNode,
-  execute_code: executeCode,
+
+  // Commands that change the document go through runMutation: one at a time,
+  // one undo step each, rolled back on failure.
+  execute_code: (params) => runMutation(() => executeCode(params), params.timeoutMs),
+  save_checkpoint: (params) => runMutation(() => saveCheckpoint(params), 60000),
 };
+
+async function saveCheckpoint(params: CommandParams["save_checkpoint"]): Promise<Json> {
+  // Figma's docs: changes made right before saving may be missing from the
+  // version unless it waits a moment.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  const version = await figma.saveVersionHistoryAsync(params.title, params.description);
+  return {
+    versionId: version.id,
+    title: params.title,
+    hint: "Restore it from File → Show version history in Figma if needed.",
+  };
+}
 
 async function handleCommand(msg: CommandMessage): Promise<void> {
   try {

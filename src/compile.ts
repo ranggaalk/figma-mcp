@@ -6,6 +6,16 @@ import { transform } from "esbuild";
  * The TypeScript loader also strips any type annotations the agent adds.
  */
 export async function compileSnippet(code: string): Promise<string> {
+  const forbidden = /\b(commitUndo|triggerUndo|closePlugin)\s*\(/.exec(code);
+  if (forbidden) {
+    throw new Error(
+      `The code calls figma.${forbidden[1]}(), which was not run. ` +
+        (forbidden[1] === "closePlugin"
+          ? "Closing the plugin disconnects this bridge."
+          : "The bridge manages undo itself: each call is one undo step and is rolled back automatically if it fails.") +
+        " Remove the call and try again.",
+    );
+  }
   const wrapped = `var __figmaBridgeMain = async function (figma, console) {\n${code}\n};`;
   try {
     const { code: compiled } = await transform(wrapped, { loader: "ts", target: "es2017" });

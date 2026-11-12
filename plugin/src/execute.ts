@@ -37,6 +37,7 @@ function loadSnippet(compiled: string): SnippetMain {
   }
 }
 
+/** Runs inside runMutation, which makes the call one undo step and rolls it back on failure. */
 export async function executeCode(params: { compiled: string }): Promise<Json> {
   if (typeof params.compiled !== "string") throw new Error("No code was provided");
   const logs: string[] = [];
@@ -50,8 +51,5 @@ export async function executeCode(params: { compiled: string }): Promise<Json> {
     let message = errorMessage(err);
     if (logs.length > 0) message += "\nconsole output before the error:\n" + logs.join("\n");
     throw new Error(message);
-  } finally {
-    // Makes each agent call its own undo step in Figma.
-    figma.commitUndo();
   }
 }

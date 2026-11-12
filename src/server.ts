@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { FigmaBridge } from "./bridge.js";
 import { compileSnippet } from "./compile.js";
-import { DEFAULT_PORT, PLUGIN_VERSION, type ExportResult } from "./protocol.js";
+import { DEFAULT_PORT, PLUGIN_TIMEOUT_MARGIN_MS, PLUGIN_VERSION, type ExportResult } from "./protocol.js";
 
 const PORT = Number(process.env.FIGMA_BRIDGE_PORT ?? DEFAULT_PORT);
 const HOST = process.env.FIGMA_BRIDGE_HOST ?? "127.0.0.1";
@@ -61,6 +61,8 @@ const server = new McpServer(
       "Reads and edits the Figma file the user currently has open, through a local plugin (no Figma REST API).",
       "Typical loop: get_status to confirm the connection → get_document_info / get_selection / get_node / get_styles to understand the file → execute_code to create or change the design → export_node to look at the result and fix what is off.",
       "Reuse the file's existing styles, variables and components instead of hard-coding values when they exist.",
+      "Before changing a design that already existed (not one you just created), call save_checkpoint so the user can restore it from Figma's version history.",
+      "Every call that changes the document is one undo step for the user, and is rolled back automatically if it fails.",
       'If a tool reports that the plugin is not connected, ask the user to run Plugins → Development → "Figma MCP Bridge" in the Figma desktop app.',
     ].join("\n"),
   },
@@ -201,9 +203,9 @@ server.registerTool(
       "- `fills`, `strokes` and `effects` are immutable arrays: assign a new array rather than mutating in place.",
       "- For auto layout set `layoutMode` on the frame first. Set a child's `layoutSizingHorizontal/Vertical` to 'FILL' or 'HUG' only after it has been appended to an auto-layout parent.",
       "- New nodes appear at (0, 0) on the current page. Append them to their parent, or position them away from existing content.",
-      "- Never call `figma.closePlugin()`; it disconnects this bridge.",
+      "- Do not call `figma.closePlugin()` (it disconnects this bridge) or `figma.commitUndo()` / `figma.triggerUndo()` (the bridge manages undo). Code that does is rejected.",
       "",
-      "Each call is one undo step in Figma. If the code throws, changes made before the error are NOT rolled back, so inspect the document before retrying. Prefer several small calls over one very large script.",
+      "Each call is one undo step in Figma. If the code throws or times out, every change it made is rolled back automatically, so the file is unchanged and you can fix the code and run it again. Prefer several small calls over one very large script.",
     ].join("\n"),
     inputSchema: {
       code: z.string().describe("Body of an async function. `figma` and `console` are in scope."),
@@ -221,8 +223,28 @@ server.registerTool(
     guarded(async () => {
       if (!bridge.connected) throw new Error(bridge.notConnectedMessage());
       const compiled = await compileSnippet(code);
-      return textResult(await bridge.request("execute_code", { compiled }, timeoutMs));
+      return textResult(
+        await bridge.request("execute_code", { compiled, timeoutMs }, timeoutMs + PLUGIN_TIMEOUT_MARGIN_MS),
+      );
     }),
+);
+
+server.registerTool(
+  "save_checkpoint",
+  {
+    title: "Save a version checkpoint",
+    description:
+      "Save a named version to the file's version history (File → Show version history in Figma), so the user can restore the design as it is now. Call it before changing designs that already existed, especially before large edits.",
+    inputSchema: {
+      title: z.string().min(1).max(200).describe('Short version name, e.g. "Before restyling the login screen".'),
+      description: z.string().max(1000).optional().describe("What is about to change."),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  ({ title, description }) =>
+    guarded(async () =>
+      textResult(await bridge.request("save_checkpoint", { title, description }, 60_000 + PLUGIN_TIMEOUT_MARGIN_MS)),
+    ),
 );
 
 bridge.start();

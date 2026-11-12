@@ -23,8 +23,12 @@ export interface CommandParams {
   get_styles: { includeVariables: boolean };
   export_node: { nodeId?: string; scale: number; maxSize: number };
   /** `compiled` defines `__figmaBridgeMain`, produced by the server's compileSnippet. */
-  execute_code: { compiled: string };
+  execute_code: { compiled: string; timeoutMs: number };
+  save_checkpoint: { title: string; description?: string };
 }
+
+/** The server waits this much longer than a mutation's own time limit, so the plugin's rollback message arrives. */
+export const PLUGIN_TIMEOUT_MARGIN_MS = 2000;
 
 export type CommandName = keyof CommandParams;
 

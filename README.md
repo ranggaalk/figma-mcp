@@ -42,8 +42,19 @@ Agent ⇄ MCP (stdio) ⇄ dist/server.js ⇄ WebSocket localhost:3055 ⇄ plugin
 | `get_styles` | Style lokal (warna, teks, efek) dan variable |
 | `export_node` | Render node ke PNG supaya agent bisa melihat hasilnya |
 | `execute_code` | Menjalankan kode Plugin API untuk membuat dan mengubah desain |
+| `save_checkpoint` | Menyimpan versi bernama ke version history file |
 
-Kode untuk `execute_code` diturunkan ke ES2017 di server sebelum dikirim, jadi agent boleh memakai sintaks modern atau TypeScript. Setiap panggilan menjadi satu langkah undo di Figma.
+Kode untuk `execute_code` diturunkan ke ES2017 di server sebelum dikirim, jadi agent boleh memakai sintaks modern atau TypeScript.
+
+### Keamanan
+
+- Setiap panggilan yang mengubah dokumen menjadi **satu langkah undo** (Ctrl+Z di Figma). Panggilan yang tidak mengubah apa pun tidak menambah langkah.
+- Kalau panggilan gagal atau melewati batas waktu, **semua perubahannya dibatalkan otomatis**. Langkah sebelumnya, termasuk editan manual Anda, tidak ikut terbatalkan.
+- Perubahan dijalankan satu per satu, jadi dua panggilan tidak saling menyela.
+- Kode yang memanggil `figma.commitUndo()`, `figma.triggerUndo()`, atau `figma.closePlugin()` ditolak sebelum dijalankan.
+- Agent diminta memanggil `save_checkpoint` sebelum mengubah desain yang sudah ada.
+
+Catatan teknis: di Figma, `triggerUndo()` membatalkan perubahan yang belum di-commit **ditambah** satu langkah ter-commit sebelumnya, bahkan saat tidak ada perubahan baru. Karena itu rollback memasang satu perubahan penanda, meng-commit, baru membatalkan (lihat `plugin/src/mutation.ts`).
 
 ## Masalah umum
 

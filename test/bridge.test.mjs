@@ -68,7 +68,8 @@ test("timeouts are reported and the bridge keeps working", async () => {
   try {
     const slow = await server.call("execute_code", { code: "await new Promise(() => {});", timeoutMs: 1000 });
     assert.equal(slow.isError, true);
-    assert.match(textOf(slow), /Timed out after 1000 ms/);
+    assert.match(textOf(slow), /Did not finish within 1000 ms/);
+    assert.match(textOf(slow), /undone/);
     assert.equal(jsonOf(await server.call("get_status")).connected, true);
   } finally {
     await plugin.close();
