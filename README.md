@@ -17,41 +17,50 @@ Agent ⇄ MCP (stdio) ⇄ dist/server.js ⇄ WebSocket localhost:3055 ⇄ plugin
 
 2. Pasang plugin di **Figma desktop**: buka file desain → `Plugins` → `Development` → `Import plugin from manifest…` → pilih `plugin/manifest.json`.
 
-   Dari Windows, folder WSL ini ada di `\\wsl.localhost\Ubuntu-24.04\home\ranggaalk\Projects\figma-mcp\plugin\`. Kalau Figma tidak mau membaca path itu, salin `manifest.json`, `code.js`, dan `ui.html` ke folder Windows lalu import dari sana.
+   Dari Windows, folder repo di WSL terlihat sebagai `\\wsl.localhost\<distro>\<path repo>\plugin\`, misalnya `\\wsl.localhost\Ubuntu-24.04\home\nama\Projects\figma-mcp\plugin\`. Kalau Figma tidak mau membaca path itu, salin `manifest.json`, `code.js`, dan `ui.html` ke folder Windows lalu import dari sana.
 
-3. Daftarkan MCP server ke agent. Untuk Claude Code di folder ini sudah ada `.mcp.json`. Supaya tersedia di semua project:
+3. Daftarkan MCP server ke agent. Untuk Claude Code, `.mcp.json` di repo ini menunjuk ke `dist/server.js` dengan path absolut; sesuaikan path itu kalau repo ada di tempat lain. Supaya tersedia di semua project, jalankan dari folder repo:
 
    ```bash
-   claude mcp add figma-bridge -s user -- node /home/ranggaalk/Projects/figma-mcp/dist/server.js
+   claude mcp add figma-bridge -s user -- node "$(pwd)/dist/server.js"
    ```
 
 ## Pemakaian
 
 1. Jalankan agent (MCP server ikut menyala).
 2. Di Figma: `Plugins` → `Development` → `Figma MCP Bridge`. Jendela plugin harus tetap terbuka; statusnya berubah jadi **Connected to MCP server**.
-3. Minta agent mendesain, misalnya: "buat frame login mobile di Figma, lalu cek hasilnya".
+3. Minta agent mendesain, misalnya "buat layar login mobile di Figma memakai komponen dan warna file ini, lalu periksa hasilnya".
+
+### Setelah update
+
+Setelah menarik versi baru dan menjalankan `npm run build`:
+
+1. Tutup jendela plugin di Figma, lalu jalankan lagi.
+2. Kalau Anda mengimpor plugin dari folder Windows, salin ulang `manifest.json`, `code.js`, dan `ui.html` lebih dulu.
+3. Restart sesi agent, atau sambungkan ulang MCP server (`/mcp` di Claude Code).
+
+Kalau versi plugin dan server berbeda, setiap tool menampilkan peringatan.
 
 ## Tools
 
-| Tool | Fungsi |
-| --- | --- |
-| `get_status` | Cek koneksi, file, halaman, dan selection aktif |
-| `get_document_info` | Daftar halaman dan node tingkat atas di halaman aktif |
-| `get_selection` | Detail node yang sedang dipilih |
-| `get_node` | Detail satu node berdasarkan id |
-| `get_styles` | Style lokal (warna, teks, efek) dan variable; opsional variable library tim dan style dari katalog |
-| `get_components` | Komponen dan component set beserta properti dan variant-nya, komponen library yang sudah dipakai, dan isi katalog library |
-| `save_library_catalog` | Menyimpan key komponen dan style file library ini, supaya bisa dipakai dari file lain |
-| `place_image` | Memasukkan file PNG/JPEG/GIF sebagai rectangle baru atau sebagai fill node |
-| `find_nodes` | Mencari layer berdasarkan nama, isi teks, atau tipe, di satu node, halaman ini, atau semua halaman |
-| `check_design` | Memeriksa frame: teks terpotong, konten terpotong, ukuran bawaan 100px, kontras rendah, warna di luar token, dan lainnya |
-| `export_node` | Render node ke PNG supaya agent bisa melihat hasilnya |
-| `build_design` | Membuat frame beserta seluruh isinya dari satu spec JSON |
-| `update_nodes` | Mengubah properti node yang sudah ada dengan format yang sama |
-| `execute_code` | Menjalankan kode Plugin API untuk hal yang tidak bisa diungkapkan lewat spec |
-| `save_checkpoint` | Menyimpan versi bernama ke version history file |
+| Kelompok | Tool | Fungsi |
+| --- | --- | --- |
+| Membaca | `get_status` | Koneksi, file, halaman, selection, dan apakah jendela Figma terlihat |
+| | `get_document_info` | Daftar halaman dan node tingkat atas di halaman aktif |
+| | `get_selection` / `get_node` | Detail node yang dipilih, atau satu node berdasarkan id |
+| | `find_nodes` | Cari layer berdasarkan nama, isi teks, atau tipe, di satu node, halaman ini, atau semua halaman |
+| Design system | `get_styles` | Style lokal (warna, teks, efek) dan variable; opsional variable library tim dan style dari katalog |
+| | `get_components` | Komponen dan component set beserta properti dan variant-nya, komponen library yang sudah dipakai, dan isi katalog library |
+| | `save_library_catalog` | Simpan key komponen dan style file library ini, supaya bisa dipakai dari file lain |
+| Mendesain | `build_design` | Buat frame beserta seluruh isinya dari satu spec JSON |
+| | `update_nodes` | Ubah properti node yang sudah ada dengan format yang sama |
+| | `place_image` | Masukkan file PNG/JPEG/GIF sebagai rectangle baru atau sebagai fill node |
+| | `execute_code` | Jalankan kode Plugin API untuk hal yang tidak bisa diungkapkan lewat spec |
+| Memeriksa | `check_design` | Temukan teks terpotong, konten terpotong, ukuran bawaan 100px, kontras rendah, warna di luar token, dan lainnya |
+| | `export_node` | Render node ke PNG supaya agent bisa melihat hasilnya |
+| Keamanan | `save_checkpoint` | Simpan versi bernama ke version history file |
 
-`build_design`, `update_nodes`, dan `execute_code` menerima `screenshot: true` untuk langsung mengembalikan PNG hasilnya.
+`build_design`, `update_nodes`, `place_image`, dan `execute_code` menerima `screenshot: true` untuk langsung mengembalikan PNG hasilnya.
 
 ### Builder (`build_design` / `update_nodes`)
 
@@ -65,13 +74,13 @@ Satu spec menggambarkan satu pohon node:
 ]}
 ```
 
-- Tipe node: `frame` (auto layout vertikal bawaan), `component`, `text`, `rect`, `ellipse`, `line`, dan `svg`.
-- Ukuran berupa angka, `"fill"`, atau `"hug"`. Builder mengurus urutan yang diwajibkan Figma, misalnya `layoutMode` sebelum anak ditempel dan `FILL` sesudahnya.
-- Font dimuat otomatis, termasuk font lama saat teks diubah. Bobot boleh angka (`600`) atau nama style.
-- Seluruh spec divalidasi sebelum ada node dibuat. Error menyebut lokasinya, misalnya `spec.children[2].fill: "blue-500" is not a color`, dan menyarankan nama properti yang benar (`backgroundColor` → `fill`).
-- Tanpa `parentId`, hasil ditaruh di ruang kosong di kanan konten yang ada.
+- **Tipe node:** `frame` (auto layout vertikal bawaan), `component`, `text`, `rect`, `ellipse`, `line` (garis pembatas), `svg` (ikon), dan `instance` (komponen).
+- **Ukuran:** angka, `"fill"`, atau `"hug"`. Builder mengurus urutan yang diwajibkan Figma, misalnya `layoutMode` sebelum anak ditempel, `FIXED` sebelum resize, dan `FILL` sesudah node masuk ke parent.
+- **Font:** dimuat otomatis, termasuk font lama saat teks diubah. Bobot boleh angka (`600`) atau nama style.
+- **Validasi:** seluruh spec diperiksa sebelum ada node dibuat. Error menyebut lokasinya, misalnya `spec.children[2].fill: "blue-500" is not a color`, dan menyarankan nama properti yang benar (`backgroundColor` → `fill`).
+- **Penempatan:** tanpa `parentId`, hasil ditaruh di ruang kosong di kanan konten yang ada; dengan `parentId` (dan opsional `index`), hasil disisipkan ke frame itu.
 
-Di dalam `execute_code`, objek `h` menyediakan builder yang sama: `h.build`, `h.apply`, `h.setText`, `h.font`, `h.paint`, dan `h.color`.
+`execute_code` tetap tersedia untuk hal yang butuh logika. Kodenya diturunkan ke ES2017 di server, jadi agent boleh memakai sintaks modern atau TypeScript. Di dalamnya, objek `h` menyediakan builder yang sama: `h.build`, `h.apply`, `h.setText`, `h.font`, `h.paint`, dan `h.color`.
 
 ### Design system
 
@@ -86,19 +95,22 @@ Spec bisa memakai token dan komponen file, alih-alih nilai mentah:
 
 - **Variable:** `{ "variable": "nama" }` untuk warna (fill, stroke, warna teks) dan angka (gap, padding, radius, strokeWeight). Nama boleh `Koleksi/nama`, id, atau key library.
 - **Style:** `{ "style": "nama" }` untuk paint style, `textStyle` untuk teks, `effectStyle` untuk bayangan.
-- **Instance:** `type: "instance"` dengan `component` (nama, id, atau key), `variant`, `props` (properti teks/boolean/swap), dan `texts` (override layer teks berdasarkan nama).
+- **Instance:** `type: "instance"` dengan `component` (nama, id, atau key), `variant`, `props` (properti teks/boolean/swap), dan `texts` (override layer teks berdasarkan nama). `update_nodes` bisa mengganti variant dan properti instance yang sudah ada.
 - **Gambar:** `place_image` mengembalikan `imageHash` yang bisa dipakai lagi sebagai `fill: { "image": "<hash>" }`.
-- Kesalahan menyebut pilihan yang tersedia, misalnya opsi variant, daftar properti, atau nama variable yang mirip.
+- **Pesan error:** kesalahan menyebut pilihan yang tersedia, misalnya opsi variant, daftar properti, atau nama variable yang mirip.
 
 #### Library tim
 
 Plugin API tidak bisa melihat isi library, tapi bisa mengimpor berdasarkan key.
 
 - **Variable library:** langsung bisa dipakai lewat nama (izin `teamlibrary`).
-- **Komponen dan style library:** buka file library sekali, jalankan plugin, lalu minta agent memanggil `save_library_catalog`. Katalog disimpan di `~/.figma-mcp-bridge/libraries/` (bisa diubah dengan `FIGMA_BRIDGE_DATA_DIR`). Setelah itu `get_components` dan `get_styles` di file lain menampilkan isinya beserta key, dan builder mengimpornya saat dipakai. Hanya item yang sudah dipublish yang bisa diimpor.
-- **Komponen library yang sudah dipakai di file** langsung terdeteksi dari instance-nya.
+- **Komponen dan style library:**
+  1. Buka file library sekali, jalankan plugin di sana, lalu minta agent memanggil `save_library_catalog`.
+  2. Katalog disimpan di `~/.figma-mcp-bridge/libraries/` (bisa diubah dengan `FIGMA_BRIDGE_DATA_DIR`).
+  3. Di file lain, `get_components` dan `get_styles` menampilkan isinya beserta key, dan builder mengimpornya saat dipakai.
 
-Kode untuk `execute_code` diturunkan ke ES2017 di server sebelum dikirim, jadi agent boleh memakai sintaks modern atau TypeScript.
+  Hanya item yang sudah dipublish yang bisa diimpor.
+- **Komponen library yang sudah dipakai di file** langsung terdeteksi dari instance-nya.
 
 ### Pemeriksaan desain
 
@@ -110,7 +122,7 @@ Kode untuk `execute_code` diturunkan ke ES2017 di server sebelum dikirim, jadi a
 | warning | konten terpotong oleh frame yang meng-clip; anak keluar dari parent auto layout; frame auto layout masih 100px bawaan; kontras teks di bawah WCAG AA; warna sama dengan token tapi tidak terhubung |
 | info | warna di luar palet file; teks tanpa text style; nama layer bawaan ("Frame 12") |
 
-`build_design` dan `update_nodes` otomatis menjalankan pemeriksaan ini dan melaporkan error dan warning di field `check`, jadi agent bisa langsung memperbaikinya.
+`build_design` dan `update_nodes` otomatis menjalankan pemeriksaan ini dan melaporkan error dan warning di field `check`, jadi agent bisa langsung memperbaikinya. Isi instance diperiksa di komponen utamanya.
 
 ### Keamanan
 
@@ -125,7 +137,9 @@ Catatan teknis: di Figma, `triggerUndo()` membatalkan perubahan yang belum di-co
 ## Masalah umum
 
 - **Plugin terus "Waiting for MCP server…"**: agent belum berjalan, atau Windows tidak bisa menjangkau `localhost:3055` di WSL. Untuk kasus kedua, aktifkan `networkingMode=mirrored` di `%UserProfile%\.wslconfig` lalu `wsl --shutdown`.
-- **`export_node` gagal dengan "Figma did not finish rendering"**: jendela Figma sedang diminimize atau tertutup penuh oleh jendela lain, dan Figma berhenti me-render di latar belakang. Taruh Figma berdampingan dengan terminal. Tool lain tetap jalan di latar belakang, hanya lebih lambat, kecuali pindah halaman (`figma.setCurrentPageAsync`), yang menunggu sampai jendela terlihat lagi.
+- **`export_node` atau `screenshot` gagal karena jendela tersembunyi**: Figma berhenti me-render saat jendelanya diminimize atau tertutup penuh oleh jendela lain. Taruh Figma berdampingan dengan terminal. Tool lain tetap jalan di latar belakang, kecuali pindah halaman (`figma.setCurrentPageAsync`), yang menunggu sampai jendela terlihat lagi.
+- **"the Figma plugin is version X but this MCP server is Y"**: ikuti langkah [Setelah update](#setelah-update).
+- **Error izin `teamlibrary`**: plugin masih memakai manifest lama. Salin ulang `manifest.json` (atau import ulang manifest), lalu jalankan ulang plugin.
 - **"Port 3055 is already in use"**: ada sesi agent lain yang menjalankan server ini. Tutup salah satunya.
 - **Ganti port**: ubah di tiga tempat, yaitu env `FIGMA_BRIDGE_PORT`, `WS_URL` di `plugin/ui.html`, dan `devAllowedDomains` di `plugin/manifest.json`.
 
@@ -135,12 +149,24 @@ Catatan teknis: di Figma, `triggerUndo()` membatalkan perubahan yang belum di-co
 npm test   # build, lalu tes end-to-end
 ```
 
-Tes menjalankan MCP client sungguhan → `dist/server.js` → WebSocket → `plugin/code.js`, dengan API Figma tiruan di `test/mock-figma.mjs`. Mock itu meniru aturan Figma yang sering bikin error (font harus dimuat, `FILL`/`HUG` hanya di tempat yang valid, semantik undo).
+Tes menjalankan MCP client sungguhan → `dist/server.js` → WebSocket → `plugin/code.js`, dengan API Figma tiruan di `test/mock-figma.mjs`. Mock itu meniru aturan Figma yang sering bikin error: font harus dimuat, `FILL`/`HUG` hanya di tempat yang valid, dynamic page loading, dan semantik undo yang diamati di Figma asli.
 
-Versi plugin dan server didefinisikan di `src/protocol.ts`. Kalau versinya berbeda, setiap tool menambahkan peringatan supaya plugin dijalankan ulang.
+| Bagian | Lokasi |
+| --- | --- |
+| Server MCP dan tool | `src/server.ts` |
+| Jembatan WebSocket | `src/bridge.ts` |
+| Protokol bersama dan versi | `src/protocol.ts` |
+| Skema spec untuk agent | `src/spec-schema.ts` |
+| Katalog library | `src/catalog.ts` |
+| Plugin: loop pesan | `plugin/src/code.ts` |
+| Plugin: builder | `plugin/src/builder.ts` |
+| Plugin: pencarian variable/style/komponen | `plugin/src/library.ts` |
+| Plugin: pemeriksaan | `plugin/src/checks.ts` |
+| Plugin: undo dan rollback | `plugin/src/mutation.ts` |
 
 ## Batasan
 
 - Figma harus terbuka dan plugin harus berjalan; tidak bisa headless.
 - Hanya file yang sedang dibuka. Kalau plugin berjalan di beberapa file, perintah dikirim ke yang terakhir terhubung.
-- Komentar, version history, dan daftar file/project tidak tersedia (itu hanya ada di REST API).
+- Satu sesi agent pada satu waktu (satu port).
+- Komentar, membaca version history, dan daftar file/project tidak tersedia (itu hanya ada di REST API).
