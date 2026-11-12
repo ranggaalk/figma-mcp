@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "figma-bridge": {
+      "command": "node",
+      "args": ["/home/ranggaalk/Projects/figma-mcp/dist/server.js"]
+    }
+  }
+}

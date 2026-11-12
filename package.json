@@ -1,0 +1,28 @@
+{
+  "name": "figma-mcp-bridge",
+  "version": "0.1.0",
+  "description": "MCP server that lets AI agents design in Figma through a local plugin bridge (no Figma REST API, no access token).",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "figma-mcp-bridge": "dist/server.js"
+  },
+  "scripts": {
+    "build": "npm run build:server && npm run build:plugin",
+    "build:server": "tsc -p tsconfig.json",
+    "build:plugin": "tsc -p plugin/tsconfig.json --noEmit && esbuild plugin/src/code.ts --bundle --target=es2017 --outfile=plugin/code.js",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "esbuild": "^0.28.2",
+    "ws": "^8.22.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.142.0",
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "typescript": "^7.0.2"
+  }
+}

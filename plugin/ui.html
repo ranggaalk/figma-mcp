@@ -1,0 +1,155 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        margin: 0;
+        padding: 12px;
+        font: 12px/1.45 Inter, system-ui, sans-serif;
+        color: var(--figma-color-text, #1e1e1e);
+        background: var(--figma-color-bg, #ffffff);
+      }
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #f5a623;
+        flex: none;
+      }
+      .dot.connected {
+        background: #14ae5c;
+      }
+      .hint {
+        margin: 6px 0 10px;
+        color: var(--figma-color-text-secondary, #757575);
+      }
+      .log {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        font: 11px/1.6 ui-monospace, Menlo, Consolas, monospace;
+        border-top: 1px solid var(--figma-color-border, #e6e6e6);
+        padding-top: 8px;
+      }
+      .log li {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .log .failed {
+        color: var(--figma-color-text-danger, #dc3412);
+      }
+      .log .time {
+        color: var(--figma-color-text-secondary, #757575);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="status"><span id="dot" class="dot"></span><span id="label">Connecting…</span></div>
+    <p id="hint" class="hint"></p>
+    <ul id="log" class="log"></ul>
+
+    <script>
+      // The port must match FIGMA_BRIDGE_PORT on the MCP server and
+      // devAllowedDomains in manifest.json.
+      const WS_URL = "ws://localhost:3055";
+      const RETRY_MS = 2000;
+      const MAX_LOG_ENTRIES = 7;
+
+      const dot = document.getElementById("dot");
+      const label = document.getElementById("label");
+      const hint = document.getElementById("hint");
+      const log = document.getElementById("log");
+
+      let socket = null;
+      const inflight = new Map(); // command id -> { command, started }
+
+      function setConnected(connected) {
+        dot.classList.toggle("connected", connected);
+        label.textContent = connected ? "Connected to MCP server" : "Waiting for MCP server…";
+        hint.textContent = connected
+          ? "Keep this window open while the agent works."
+          : "Start your agent (the MCP server listens on " + WS_URL + "). Retrying automatically.";
+      }
+
+      function addLogEntry(command, ok, ms) {
+        const item = document.createElement("li");
+        if (!ok) item.className = "failed";
+        const name = document.createElement("span");
+        name.textContent = (ok ? "✓ " : "✗ ") + command;
+        const time = document.createElement("span");
+        time.className = "time";
+        time.textContent = ms + " ms";
+        item.append(name, time);
+        log.prepend(item);
+        while (log.children.length > MAX_LOG_ENTRIES) log.lastChild.remove();
+      }
+
+      function toPlugin(message) {
+        parent.postMessage({ pluginMessage: message }, "*");
+      }
+
+      // Figma stops rendering (and exports hang) while its window is hidden, so
+      // the main thread needs to know.
+      function reportVisibility() {
+        toPlugin({ type: "visibility", hidden: document.hidden });
+      }
+      document.addEventListener("visibilitychange", reportVisibility);
+
+      function connect() {
+        const ws = new WebSocket(WS_URL);
+        socket = ws;
+
+        ws.onopen = () => {
+          setConnected(true);
+          toPlugin({ type: "ws-open" });
+          reportVisibility();
+        };
+
+        ws.onmessage = (event) => {
+          let message;
+          try {
+            message = JSON.parse(event.data);
+          } catch (_) {
+            return;
+          }
+          if (message.type === "command") {
+            inflight.set(message.id, { command: message.command, started: Date.now() });
+          }
+          toPlugin(message);
+        };
+
+        ws.onclose = () => {
+          if (socket !== ws) return;
+          socket = null;
+          inflight.clear();
+          setConnected(false);
+          setTimeout(connect, RETRY_MS);
+        };
+      }
+
+      // Replies from the plugin's main thread, to be forwarded to the MCP server.
+      window.onmessage = (event) => {
+        const message = event.data && event.data.pluginMessage;
+        if (!message || message.type !== "to-server") return;
+        const payload = message.payload;
+        const request = payload && inflight.get(payload.id);
+        if (request) {
+          inflight.delete(payload.id);
+          addLogEntry(request.command, payload.ok === true, Date.now() - request.started);
+        }
+        if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+      };
+
+      setConnected(false);
+      connect();
+    </script>
+  </body>
+</html>
