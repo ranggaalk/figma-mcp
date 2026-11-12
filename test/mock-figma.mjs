@@ -489,6 +489,9 @@ export function createMockFigma(options = {}) {
     get variantProperties() {
       return this._parent?.type === "COMPONENT_SET" ? parseVariantName(this._p.name) : null;
     },
+    async getPublishStatusAsync() {
+      return this._p.publishStatus ?? "UNPUBLISHED";
+    },
     get componentPropertyDefinitions() {
       if (this._parent?.type === "COMPONENT_SET") {
         throw new Error("in get_componentPropertyDefinitions: Can only get definitions of a component set or non-variant component");
@@ -519,6 +522,9 @@ export function createMockFigma(options = {}) {
     },
     get defaultVariant() {
       return this._children[0];
+    },
+    async getPublishStatusAsync() {
+      return this._p.publishStatus ?? "UNPUBLISHED";
     },
     get componentPropertyDefinitions() {
       const defs = clone(this._p.defs ?? {});
@@ -1061,6 +1067,9 @@ export function createMockFigma(options = {}) {
       remote: props.remote === true,
       description: "",
       ...props,
+      async getPublishStatusAsync() {
+        return props.publishStatus ?? "UNPUBLISHED";
+      },
       remove() {
         styles.delete(this.id);
       },

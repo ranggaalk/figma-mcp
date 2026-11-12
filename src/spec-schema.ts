@@ -9,7 +9,21 @@ const color = z
   .string()
   .describe('"#RRGGBB", "#RRGGBBAA" (last pair is alpha), "rgb(…)"/"rgba(…)", "white", "black" or "transparent"');
 
-const paint = z.union([color, z.null()]);
+const variableRef = z.looseObject({ variable: z.string() }).describe('Bind to a variable by name ("color/primary", or "Collection/name"), id or library key.');
+const styleRef = z.looseObject({ style: z.string() }).describe("Use a paint style by name, id or library key.");
+const imageRef = z
+  .looseObject({ image: z.string(), scaleMode: z.enum(["fill", "fit", "crop", "tile"]).optional() })
+  .describe("An image added with place_image, by its imageHash.");
+
+// Any other object is passed through so the plugin can explain what is wrong
+// with it (its messages list the accepted forms; zod's would only say "invalid").
+const otherObject = z.record(z.string(), z.unknown());
+/** Colors may also be bound to a color variable or a paint style. */
+const paint = z.union([color, z.null(), variableRef, styleRef, otherObject]);
+/** Background fills may also be images. */
+const fillPaint = z.union([color, z.null(), variableRef, styleRef, imageRef, otherObject]);
+/** Spacing and radii may be bound to a number variable. */
+const num = z.union([z.number(), variableRef, otherObject]);
 
 const size = z
   .union([z.number(), z.enum(["fill", "hug"])])
@@ -54,25 +68,26 @@ const props = {
   visible: z.boolean().optional(),
 
   // frame, component, rect, ellipse, line
-  fill: paint
+  fill: fillPaint
     .optional()
-    .describe("Background color, or null for none. Top-level frames default to white, nested frames to none."),
+    .describe("Background: color, variable, style, image, or null for none. Top-level frames default to white, nested frames to none."),
   stroke: paint.optional().describe("Border color (inside, 1px unless strokeWeight)."),
-  strokeWeight: z.number().optional(),
+  strokeWeight: num.optional(),
   radius: z
-    .union([z.number(), z.array(z.number())])
+    .union([num, z.array(num)])
     .optional()
     .describe("Corner radius, or [topLeft, topRight, bottomRight, bottomLeft]."),
   shadow: z.union([shadow, z.array(shadow), z.null()]).optional(),
+  effectStyle: z.string().optional().describe("Effect style (shadows) by name, id or key, instead of shadow."),
 
   // frame, component
   layout: z
     .enum(["vertical", "horizontal", "none"])
     .optional()
     .describe('Frames: auto layout direction, default "vertical". "none" places children by x/y and needs width and height.'),
-  gap: z.number().optional().describe("Frames: space between children."),
+  gap: num.optional().describe("Frames: space between children."),
   padding: z
-    .union([z.number(), z.array(z.number())])
+    .union([num, z.array(num)])
     .optional()
     .describe("Frames: all sides, [vertical, horizontal] or [top, right, bottom, left]."),
   align: z
@@ -81,7 +96,7 @@ const props = {
     .describe("Frames: start/center/end/space-between along the layout direction. Text: left/center/right/justified."),
   crossAlign: z.enum(["start", "center", "end", "baseline"]).optional().describe("Frames: alignment across the layout direction."),
   wrap: z.boolean().optional().describe("Horizontal frames: wrap children onto new rows."),
-  rowGap: z.number().optional().describe("Space between wrapped rows."),
+  rowGap: num.optional().describe("Space between wrapped rows."),
   clip: z.boolean().optional().describe("Frames: clip content. Default true at the top level, false when nested."),
 
   // text
@@ -101,14 +116,35 @@ const props = {
     .describe('Text: pixels (24), a multiplier up to 3 (1.5), "150%" or "auto".'),
   letterSpacing: z.union([z.number(), z.string()]).optional().describe('Text: pixels (0.5) or "-2%".'),
   decoration: z.enum(["none", "underline", "strikethrough"]).optional(),
+  textStyle: z
+    .string()
+    .optional()
+    .describe("Text: a text style by name, id or key. It sets font, size, line height and letter spacing, so leave those out."),
+
+  // instance
+  variant: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe('Instance: variant choices, e.g. {"Size":"Large","State":"Hover"}.'),
+  props: z
+    .record(z.string(), z.union([z.string(), z.boolean()]))
+    .optional()
+    .describe('Instance: component properties by name, e.g. {"Label":"Save","Show icon":false}.'),
+  texts: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe('Instance: set text layers by layer name, e.g. {"Title":"Hello"}, for components without text properties.'),
 };
 
 export const nodeSpecSchema = z
   .looseObject({
     type: z
-      .enum(["frame", "component", "text", "rect", "ellipse", "line", "svg"])
-      .describe('"component" is a frame that becomes a main component. "line" is a divider (width "fill", height 1, colored by fill).'),
+      .enum(["frame", "component", "text", "rect", "ellipse", "line", "svg", "instance"])
+      .describe(
+        '"component" is a frame that becomes a main component. "line" is a divider (width "fill", height 1, colored by fill). "instance" places a component (see get_components).',
+      ),
     ...props,
+    component: z.string().optional().describe("Instance: component or component set by name, id, or library key."),
     svg: z.string().optional().describe("Svg: the SVG markup (icons). width/height scale it, keeping the aspect ratio."),
     children: z
       .array(z.record(z.string(), z.unknown()))

@@ -68,6 +68,54 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () =>
   });
 }
 
+export function editDistance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let previous = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const current = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
+      previous = current;
+    }
+  }
+  return row[b.length];
+}
+
+/** The option closest to `word`, if it is close enough to be a likely typo. */
+export function closest(word: string, options: string[]): string | undefined {
+  const lower = word.toLowerCase();
+  let best: string | undefined;
+  let bestScore = Infinity;
+  for (const option of options) {
+    const score = editDistance(lower, option.toLowerCase());
+    if (score < bestScore) {
+      best = option;
+      bestScore = score;
+    }
+  }
+  return bestScore <= Math.max(2, Math.floor(word.length / 3)) ? best : undefined;
+}
+
+/** Up to `limit` names that contain `word` or are close to it, for "did you mean" lists. */
+export function similarNames(word: string, names: string[], limit = 5): string[] {
+  const lower = word.toLowerCase();
+  const scored = names
+    .map((name) => {
+      const n = name.toLowerCase();
+      const score = n.indexOf(lower) !== -1 || lower.indexOf(n) !== -1 ? 0 : editDistance(lower, n);
+      return { name, score };
+    })
+    .filter((entry) => entry.score <= Math.max(3, Math.floor(word.length / 2)))
+    .sort((a, b) => a.score - b.score);
+  const out: string[] = [];
+  for (const entry of scored) {
+    if (out.indexOf(entry.name) === -1) out.push(entry.name);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 export async function requireNode(nodeId: unknown): Promise<BaseNode> {
   if (typeof nodeId !== "string" || !nodeId) throw new Error("nodeId is required");
   const node = await figma.getNodeByIdAsync(nodeId);

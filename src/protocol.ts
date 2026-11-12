@@ -2,7 +2,7 @@
 // Keep this file free of Node and Figma APIs: types and constants only.
 
 /** Version of the plugin this server was built with. Both sides must match. */
-export const PLUGIN_VERSION = "0.2.0";
+export const PLUGIN_VERSION = "0.3.0";
 
 export const DEFAULT_PORT = 3055;
 
@@ -20,7 +20,19 @@ export interface CommandParams {
   get_document_info: Record<string, never>;
   get_selection: { depth: number };
   get_node: { nodeId: string; depth: number };
-  get_styles: { includeVariables: boolean };
+  get_styles: { includeVariables: boolean; includeLibraries: boolean };
+  get_components: { query?: string; limit: number; includeUsed: boolean };
+  /** Keys, names and properties of this file's components and styles, for save_library_catalog. */
+  library_snapshot: Record<string, never>;
+  place_image: {
+    base64: string;
+    name: string;
+    nodeId?: string;
+    parentId?: string;
+    width?: number;
+    scaleMode: "FILL" | "FIT" | "CROP" | "TILE";
+    screenshot?: boolean;
+  };
   export_node: { nodeId?: string; scale: number; maxSize: number };
   /** `compiled` defines `__figmaBridgeMain`, produced by the server's compileSnippet. */
   execute_code: { compiled: string; timeoutMs: number; screenshot?: boolean };

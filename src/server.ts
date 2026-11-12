@@ -3,7 +3,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { FigmaBridge } from "./bridge.js";
+import { catalogStyles, saveCatalog, searchCatalogComponents } from "./catalog.js";
 import { compileSnippet } from "./compile.js";
+import { readImageFile } from "./images.js";
 import {
   BUILD_TIMEOUT_MS,
   DEFAULT_PORT,
@@ -90,7 +92,7 @@ const server = new McpServer(
       "Reads and edits the Figma file the user currently has open, through a local plugin (no Figma REST API).",
       "Typical loop: get_status to confirm the connection → get_document_info / get_selection / get_node / get_styles to understand the file → build_design to create screens and components, update_nodes to change existing nodes → look at the screenshot (screenshot: true) and fix what is off.",
       "Use execute_code only for what build_design and update_nodes cannot express (loops over many nodes, component variants, reading data); inside it, the `h` helpers give the same builder.",
-      "Reuse the file's existing styles, variables and components instead of hard-coding values when they exist.",
+      "Reuse the file's design system instead of hard-coding values: get_styles lists styles and variables, get_components lists components. In specs, bind colors and spacing with { \"variable\": \"name\" } or { \"style\": \"name\" }, text with textStyle, and place components with type \"instance\".",
       "Before changing a design that already existed (not one you just created), call save_checkpoint so the user can restore it from Figma's version history.",
       "Every call that changes the document is one undo step for the user, and is rolled back automatically if it fails.",
       'If a tool reports that the plugin is not connected, ask the user to run Plugins → Development → "Figma MCP Bridge" in the Figma desktop app.',
@@ -171,14 +173,113 @@ server.registerTool(
   {
     title: "Read local styles and variables",
     description:
-      "Return the file's local paint, text and effect styles, and its variable collections with values per mode. Check this before designing so new work reuses the existing design tokens.",
+      "Return the file's local paint, text and effect styles, and its variable collections with values per mode. Check this before designing so new work reuses the existing design tokens. With includeLibraries, also list variables from enabled team libraries and styles from saved library catalogs (see save_library_catalog), with the keys needed to use them.",
     inputSchema: {
       includeVariables: z.boolean().default(true).describe("Set to false to skip variables in files with very many."),
+      includeLibraries: z.boolean().default(false).describe("Also list team-library variables and catalog styles."),
     },
     annotations: { readOnlyHint: true },
   },
-  ({ includeVariables }) =>
-    guarded(async () => textResult(await bridge.request("get_styles", { includeVariables }, READ_TIMEOUT_MS))),
+  ({ includeVariables, includeLibraries }) =>
+    guarded(async () => {
+      const styles = (await bridge.request("get_styles", { includeVariables, includeLibraries }, READ_TIMEOUT_MS)) as Record<string, unknown>;
+      if (includeLibraries) styles.libraryCatalogStyles = await catalogStyles();
+      return textResult(styles);
+    }),
+);
+
+server.registerTool(
+  "get_components",
+  {
+    title: "List components",
+    description:
+      "List components and component sets in this file (with their properties and variant options), library components already used in the file, and matches from saved library catalogs. Place one with build_design type \"instance\" and component set to its name, id or key.",
+    inputSchema: {
+      query: z.string().optional().describe('Filter by name, e.g. "button".'),
+      limit: z.number().int().min(1).max(500).default(50).describe("Maximum results per group."),
+      includeUsed: z
+        .boolean()
+        .default(true)
+        .describe("Scan instances for library components already used in this file (slower in very large files)."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  ({ query, limit, includeUsed }) =>
+    guarded(async () => {
+      const result = (await bridge.request("get_components", { query, limit, includeUsed }, 120_000)) as Record<string, unknown>;
+      const catalogs = await searchCatalogComponents(query, limit);
+      if (catalogs.length > 0) result.libraryCatalogs = catalogs;
+      else result.libraryCatalogsHint = "No saved library catalogs match. To use a team library's components here, open the library file, run the plugin there and call save_library_catalog once.";
+      return textResult(result);
+    }),
+);
+
+server.registerTool(
+  "save_library_catalog",
+  {
+    title: "Save this file as a library catalog",
+    description:
+      "Run this in a library file (one whose components and styles are published to a team library). It saves their names, keys and properties on this computer, so get_components and get_styles in other files can find them and build_design can import them by key. Only published items can be imported elsewhere; each entry shows its publish status.",
+    annotations: { readOnlyHint: true },
+  },
+  () =>
+    guarded(async () => {
+      const snapshot = (await bridge.request("library_snapshot", {}, 120_000)) as {
+        fileName: string;
+        components: Array<Record<string, unknown>>;
+        styles: Array<Record<string, unknown>>;
+      };
+      const path = await saveCatalog(snapshot as any);
+      const unpublished = [...snapshot.components, ...snapshot.styles].filter((item) => item.published === "UNPUBLISHED").length;
+      return textResult({
+        saved: path,
+        library: snapshot.fileName,
+        components: snapshot.components.length,
+        styles: snapshot.styles.length,
+        unpublished,
+        hint: unpublished
+          ? `${unpublished} item(s) are not published yet; publish the library in Figma so other files can import them.`
+          : "Other files can now find these with get_components / get_styles (includeLibraries).",
+      });
+    }),
+);
+
+server.registerTool(
+  "place_image",
+  {
+    title: "Add an image file",
+    description:
+      "Put a PNG, JPEG or GIF from this computer into Figma: as a new rectangle at its natural size (or scaled to width), or as the fill of an existing node. Returns an imageHash to reuse in build_design / update_nodes as fill: { \"image\": \"<imageHash>\" }. Windows paths (C:\\…) are read through /mnt/c.",
+    inputSchema: {
+      path: z.string().describe("Path to the image file."),
+      nodeId: z.string().optional().describe("Fill this existing node with the image instead of creating a rectangle."),
+      parentId: z.string().optional().describe("Frame to put the new rectangle in. Default: free space on the current page."),
+      width: z.number().positive().optional().describe("Scale the new rectangle to this width, keeping the aspect ratio."),
+      scaleMode: z.enum(["fill", "fit", "crop", "tile"]).default("fill").describe("How the image fills its node."),
+      name: z.string().optional().describe("Layer name. Default: the file name."),
+      screenshot: screenshotSchema,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  ({ path, nodeId, parentId, width, scaleMode, name, screenshot }) =>
+    guarded(async () => {
+      const image = await readImageFile(path);
+      return resultWithScreenshot(
+        await bridge.request(
+          "place_image",
+          {
+            base64: image.base64,
+            name: name ?? image.name,
+            nodeId: nodeId ? normalizeNodeId(nodeId) : undefined,
+            parentId: parentId ? normalizeNodeId(parentId) : undefined,
+            width,
+            scaleMode: scaleMode.toUpperCase() as "FILL" | "FIT" | "CROP" | "TILE",
+            screenshot,
+          },
+          BUILD_TIMEOUT_MS + PLUGIN_TIMEOUT_MARGIN_MS,
+        ),
+      );
+    }),
 );
 
 server.registerTool(
@@ -240,6 +341,7 @@ server.registerTool(
       "- `fills`, `strokes` and `effects` are immutable arrays: assign a new array rather than mutating in place.",
       "- For auto layout set `layoutMode` on the frame first. Set a child's `layoutSizingHorizontal/Vertical` to 'FILL' or 'HUG' only after it has been appended to an auto-layout parent.",
       "- New nodes appear at (0, 0) on the current page. Append them to their parent, or position them away from existing content.",
+      "- `figma.setCurrentPageAsync` does not finish while the Figma window is hidden (get_status: figmaWindowVisible). Work on another page through `page.loadAsync()` and `page.appendChild()` instead of switching to it.",
       "- Do not call `figma.closePlugin()` (it disconnects this bridge) or `figma.commitUndo()` / `figma.triggerUndo()` (the bridge manages undo). Code that does is rejected.",
       "",
       "Each call is one undo step in Figma. If the code throws or times out, every change it made is rolled back automatically, so the file is unchanged and you can fix the code and run it again. Prefer several small calls over one very large script.",

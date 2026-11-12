@@ -1,9 +1,10 @@
 // Declarative builder behind build_design, update_nodes and the `h` helpers.
 //
 // Work happens in two passes. The plan pass checks the whole spec and
-// resolves everything it refers to (fonts, …) without touching the document,
-// so a mistake anywhere is reported with its path before any node exists.
-// The build pass then creates or changes nodes in the order Figma requires.
+// resolves everything it refers to (fonts, variables, styles, components,
+// images) without touching the document, so a mistake anywhere is reported
+// with its path before any node exists. The build pass then creates or
+// changes nodes in the order Figma requires.
 
 import {
   checkWeight,
@@ -15,8 +16,9 @@ import {
   weightOfStyle,
   type FontRequest,
 } from "./fonts";
+import { findComponent, findStyle, findVariable, textLayerNames, type ComponentLike, type StyleKind } from "./library";
 import { parseColor, shadowEffect, solid, SHADOW_KEYS, type ShadowSpec } from "./paint";
-import { errorMessage, safe, type Json } from "./util";
+import { closest, errorMessage, safe, type Json } from "./util";
 
 export class SpecError extends Error {}
 
@@ -26,15 +28,29 @@ function fail(path: string, message: string): never {
 
 type Size = number | "fill" | "hug";
 type Layout = "VERTICAL" | "HORIZONTAL" | "NONE";
-type Kind = "frame" | "component" | "text" | "rect" | "ellipse" | "line" | "svg" | "shape" | "group" | "instance";
+type Kind = "frame" | "component" | "text" | "rect" | "ellipse" | "line" | "svg" | "instance" | "shape" | "group";
 
 // ------------------------------------------------------------------ keys
 
 const COMMON_KEYS = ["name", "width", "height", "x", "y", "absolute", "opacity", "visible"];
-const BOX_KEYS = ["fill", "stroke", "strokeWeight", "radius", "shadow"];
+const BOX_KEYS = ["fill", "stroke", "strokeWeight", "radius", "shadow", "effectStyle"];
 const FRAME_KEYS = ["layout", "gap", "padding", "align", "crossAlign", "wrap", "rowGap", "clip"];
-const TEXT_KEYS = ["text", "spans", "font", "weight", "italic", "size", "color", "lineHeight", "letterSpacing", "align", "decoration"];
+const TEXT_KEYS = [
+  "text",
+  "spans",
+  "font",
+  "weight",
+  "italic",
+  "size",
+  "color",
+  "lineHeight",
+  "letterSpacing",
+  "align",
+  "decoration",
+  "textStyle",
+];
 const SPAN_KEYS = ["text", "font", "weight", "italic", "size", "color", "decoration"];
+const INSTANCE_KEYS = ["variant", "props", "texts"];
 const without = (keys: string[], ...removed: string[]) => keys.filter((key) => removed.indexOf(key) === -1);
 
 /** Keys a spec may use when creating each type of node. */
@@ -43,16 +59,17 @@ const SPEC_KEYS: Record<string, string[]> = {
   component: ["type", ...COMMON_KEYS, ...BOX_KEYS, ...FRAME_KEYS, "children"],
   text: ["type", ...COMMON_KEYS, ...TEXT_KEYS],
   rect: ["type", ...COMMON_KEYS, ...BOX_KEYS],
-  ellipse: ["type", ...without(COMMON_KEYS), ...without(BOX_KEYS, "radius")],
+  ellipse: ["type", ...COMMON_KEYS, ...without(BOX_KEYS, "radius")],
   line: ["type", ...COMMON_KEYS, ...without(BOX_KEYS, "radius")],
   svg: ["type", ...COMMON_KEYS, "svg", "color"],
+  instance: ["type", ...COMMON_KEYS, "component", ...INSTANCE_KEYS],
 };
 
 /** Keys update_nodes accepts for each kind of existing node. */
 const UPDATE_KEYS: Record<Kind, string[]> = {
   frame: [...COMMON_KEYS, ...BOX_KEYS, ...FRAME_KEYS],
   component: [...COMMON_KEYS, ...BOX_KEYS, ...FRAME_KEYS],
-  instance: [...COMMON_KEYS, ...BOX_KEYS, ...FRAME_KEYS],
+  instance: [...COMMON_KEYS, ...BOX_KEYS, ...FRAME_KEYS, ...INSTANCE_KEYS],
   text: [...COMMON_KEYS, ...TEXT_KEYS],
   rect: [...COMMON_KEYS, ...BOX_KEYS],
   ellipse: [...COMMON_KEYS, ...without(BOX_KEYS, "radius")],
@@ -97,34 +114,6 @@ function isObject(value: unknown): value is Record<string, any> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function editDistance(a: string, b: string): number {
-  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
-  for (let i = 1; i <= a.length; i++) {
-    let previous = row[0];
-    row[0] = i;
-    for (let j = 1; j <= b.length; j++) {
-      const current = row[j];
-      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
-      previous = current;
-    }
-  }
-  return row[b.length];
-}
-
-function closest(word: string, options: string[]): string | undefined {
-  const lower = word.toLowerCase();
-  let best: string | undefined;
-  let bestScore = Infinity;
-  for (const option of options) {
-    const score = editDistance(lower, option.toLowerCase());
-    if (score < bestScore) {
-      best = option;
-      bestScore = score;
-    }
-  }
-  return bestScore <= Math.max(2, Math.floor(word.length / 3)) ? best : undefined;
-}
-
 const SYNONYMS: Record<string, string> = {
   background: "fill",
   backgroundColor: "fill",
@@ -150,6 +139,9 @@ const SYNONYMS: Record<string, string> = {
   textColor: "color",
   textAlign: "align",
   boxShadow: "shadow",
+  variants: "variant",
+  properties: "props",
+  overrides: "texts",
 };
 
 function checkKeys(object: Record<string, unknown>, allowed: string[], path: string, what: string): void {
@@ -187,16 +179,6 @@ function oneOf<T extends string>(value: unknown, options: Record<string, T>, pat
   return options[value];
 }
 
-function paints(value: unknown, path: string): Paint[] {
-  if (value === null || value === "none") return [];
-  if (typeof value !== "string") fail(path, 'must be a color string such as "#1E293B", or null for none');
-  try {
-    return [solid(parseColor(value))];
-  } catch (err) {
-    fail(path, errorMessage(err));
-  }
-}
-
 const LAYOUTS: Record<string, Layout> = { vertical: "VERTICAL", horizontal: "HORIZONTAL", none: "NONE" };
 const ALIGN: Record<string, "MIN" | "CENTER" | "MAX" | "SPACE_BETWEEN"> = {
   start: "MIN",
@@ -221,6 +203,7 @@ const DECORATION: Record<string, "NONE" | "UNDERLINE" | "STRIKETHROUGH"> = {
   underline: "UNDERLINE",
   strikethrough: "STRIKETHROUGH",
 };
+const SCALE_MODES: Record<string, "FILL" | "FIT" | "CROP" | "TILE"> = { fill: "FILL", fit: "FIT", crop: "CROP", tile: "TILE" };
 
 function lineHeight(value: unknown, path: string): LineHeight {
   if (value === "auto") return { unit: "AUTO" };
@@ -238,30 +221,118 @@ function letterSpacing(value: unknown, path: string): LetterSpacing {
   fail(path, 'must be pixels (0.5) or a percentage ("-2%")');
 }
 
-// ----------------------------------------------------------------- plans
+// ------------------------------------------------------------- resources
 
-/** Fonts and other things a spec refers to, resolved before anything is built. */
+interface FontEntry {
+  request: FontRequest;
+  path: string;
+  /** Take the family from this text style once it is resolved. */
+  styleKey?: string;
+}
+
+/**
+ * Everything a spec refers to. Requests are collected while planning and
+ * resolved together before anything is built, so a missing font, variable,
+ * style or component is reported before the document changes.
+ */
 class Resources {
-  private readonly fontRequests: Record<string, { request: FontRequest; path: string }> = {};
+  private readonly fontEntries: Record<string, FontEntry> = {};
   private readonly fonts: Record<string, FontName> = {};
-  /** Fonts already used by text that is about to change; they must be loaded too. */
+  private readonly variableRequests: Record<string, { ref: string; type: VariableResolvedDataType; path: string }> = {};
+  private readonly variables: Record<string, Variable> = {};
+  private readonly styleRequests: Record<string, { ref: string; kind: StyleKind; path: string }> = {};
+  private readonly styles: Record<string, BaseStyle> = {};
+  private readonly componentRequests: Record<string, { ref: string; path: string }> = {};
+  private readonly components: Record<string, ComponentLike> = {};
+  private readonly imageRequests: Record<string, string> = {};
+  private readonly later: Array<() => Promise<void>> = [];
+  /** Fonts of text that is about to change (or of a text style); they must be loaded too. */
   readonly existingFonts: FontName[] = [];
 
-  requestFont(request: FontRequest, path: string): string {
-    const key = fontRequestKey(request);
-    if (!this.fontRequests[key]) this.fontRequests[key] = { request, path };
+  requestFont(request: FontRequest, path: string, styleKey?: string): string {
+    const key = fontRequestKey(request) + (styleKey ? "|" + styleKey : "");
+    if (!this.fontEntries[key]) this.fontEntries[key] = { request, path, styleKey };
     return key;
+  }
+
+  requestVariable(ref: string, type: VariableResolvedDataType, path: string): string {
+    const key = `${type}|${ref}`;
+    if (!this.variableRequests[key]) this.variableRequests[key] = { ref, type, path };
+    return key;
+  }
+
+  requestStyle(ref: string, kind: StyleKind, path: string): string {
+    const key = `${kind}|${ref}`;
+    if (!this.styleRequests[key]) this.styleRequests[key] = { ref, kind, path };
+    return key;
+  }
+
+  requestComponent(ref: string, path: string): string {
+    if (!this.componentRequests[ref]) this.componentRequests[ref] = { ref, path };
+    return ref;
+  }
+
+  requestImage(hash: string, path: string): void {
+    if (!this.imageRequests[hash]) this.imageRequests[hash] = path;
+  }
+
+  /** Work that needs the resolved resources (e.g. picking a component variant). */
+  after(work: () => Promise<void>): void {
+    this.later.push(work);
   }
 
   font(key: string): FontName {
     return this.fonts[key];
   }
+  variable(key: string): Variable {
+    return this.variables[key];
+  }
+  style(key: string): BaseStyle {
+    return this.styles[key];
+  }
+  component(key: string): ComponentLike {
+    return this.components[key];
+  }
 
   async resolve(): Promise<void> {
-    for (const key of Object.keys(this.fontRequests)) {
-      const { request, path } = this.fontRequests[key];
+    for (const key of Object.keys(this.variableRequests)) {
+      const { ref, type, path } = this.variableRequests[key];
       try {
-        this.fonts[key] = await resolveFont(request);
+        this.variables[key] = await findVariable(ref, type);
+      } catch (err) {
+        fail(path, errorMessage(err));
+      }
+    }
+    for (const key of Object.keys(this.styleRequests)) {
+      const { ref, kind, path } = this.styleRequests[key];
+      try {
+        const style = await findStyle(ref, kind);
+        this.styles[key] = style;
+        if (style.type === "TEXT") this.existingFonts.push((style as TextStyle).fontName);
+      } catch (err) {
+        fail(path, errorMessage(err));
+      }
+    }
+    for (const ref of Object.keys(this.componentRequests)) {
+      try {
+        this.components[ref] = await findComponent(ref);
+      } catch (err) {
+        fail(this.componentRequests[ref].path, errorMessage(err));
+      }
+    }
+    for (const hash of Object.keys(this.imageRequests)) {
+      if (!figma.getImageByHash(hash)) {
+        fail(this.imageRequests[hash], `no image with hash "${hash}" in this file; add the image with place_image first and use the imageHash it returns`);
+      }
+    }
+    for (const work of this.later) await work();
+
+    for (const key of Object.keys(this.fontEntries)) {
+      const { request, path, styleKey } = this.fontEntries[key];
+      const fromStyle = styleKey ? (this.styles[styleKey] as TextStyle | undefined) : undefined;
+      const effective = fromStyle && !request.family ? { ...request, family: fromStyle.fontName.family } : request;
+      try {
+        this.fonts[key] = await resolveFont(effective);
       } catch (err) {
         fail(path, errorMessage(err));
       }
@@ -271,11 +342,18 @@ class Resources {
   }
 }
 
+// ----------------------------------------------------------------- plans
+
+/** A color, an image, or a binding to a color variable or paint style. */
+type PaintPlan = { paints: Paint[] } | { variable: string } | { style: string };
+/** A number, or a binding to a number variable. */
+type NumberPlan = number | { variable: string };
+
 interface SpanPlan {
   length: number;
   font?: string;
   size?: number;
-  fills?: Paint[];
+  fills?: PaintPlan;
   decoration?: TextDecoration;
 }
 
@@ -283,12 +361,24 @@ interface TextPlan {
   characters?: string;
   spans?: SpanPlan[];
   font?: string;
+  textStyle?: string;
   size?: number;
-  fills?: Paint[];
+  fills?: PaintPlan;
   lineHeight?: LineHeight;
   letterSpacing?: LetterSpacing;
   align?: "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED";
   decoration?: TextDecoration;
+}
+
+interface InstancePlan {
+  component?: string;
+  variant?: Record<string, string>;
+  props?: Record<string, string | boolean>;
+  texts?: Record<string, string>;
+  /** Filled in during resolve. */
+  source?: ComponentNode;
+  setProps?: Record<string, string | boolean>;
+  textOverrides?: Array<[string, string]>;
 }
 
 interface Plan {
@@ -302,22 +392,24 @@ interface Plan {
   absolute?: boolean;
   opacity?: number;
   visible?: boolean;
-  fills?: Paint[];
-  strokes?: Paint[];
-  strokeWeight?: number;
-  radius?: number | [number, number, number, number];
+  fills?: PaintPlan;
+  strokes?: PaintPlan;
+  strokeWeight?: NumberPlan;
+  radius?: NumberPlan | [NumberPlan, NumberPlan, NumberPlan, NumberPlan];
   effects?: Effect[];
+  effectStyle?: string;
   layout?: Layout;
-  gap?: number;
-  padding?: [number, number, number, number];
+  gap?: NumberPlan;
+  padding?: [NumberPlan, NumberPlan, NumberPlan, NumberPlan];
   align?: "MIN" | "CENTER" | "MAX" | "SPACE_BETWEEN";
   crossAlign?: "MIN" | "CENTER" | "MAX" | "BASELINE";
   wrap?: boolean;
-  rowGap?: number;
+  rowGap?: NumberPlan;
   clip?: boolean;
   text?: TextPlan;
   svg?: string;
   svgFills?: Paint[];
+  instance?: InstancePlan;
   children?: Plan[];
 }
 
@@ -329,6 +421,45 @@ interface Context {
   /** The node being updated, when updating. */
   existing?: SceneNode;
   resources: Resources;
+}
+
+const PAINT_FORMS = 'a color such as "#1E293B", { "variable": "color/primary" }, { "style": "Brand/Primary" }, { "image": "<imageHash>" } or null';
+
+function planPaint(value: unknown, path: string, resources: Resources, allow: { style?: boolean; image?: boolean } = {}): PaintPlan {
+  if (value === null || value === "none") return { paints: [] };
+  if (typeof value === "string") {
+    try {
+      return { paints: [solid(parseColor(value))] };
+    } catch (err) {
+      fail(path, errorMessage(err));
+    }
+  }
+  if (isObject(value)) {
+    if ("variable" in value) {
+      checkKeys(value, ["variable"], path, "a variable binding");
+      return { variable: resources.requestVariable(string(value.variable, `${path}.variable`), "COLOR", path) };
+    }
+    if ("style" in value && allow.style !== false) {
+      checkKeys(value, ["style"], path, "a style binding");
+      return { style: resources.requestStyle(string(value.style, `${path}.style`), "PAINT", path) };
+    }
+    if ("image" in value && allow.image) {
+      checkKeys(value, ["image", "scaleMode"], path, "an image fill");
+      const hash = string(value.image, `${path}.image`);
+      resources.requestImage(hash, path);
+      const scaleMode = value.scaleMode === undefined ? "FILL" : oneOf(value.scaleMode, SCALE_MODES, `${path}.scaleMode`);
+      return { paints: [{ type: "IMAGE", imageHash: hash, scaleMode, visible: true, opacity: 1, blendMode: "NORMAL" } as ImagePaint] };
+    }
+  }
+  fail(path, `must be ${PAINT_FORMS}`);
+}
+
+function planNumber(value: unknown, path: string, resources: Resources, min = 0): NumberPlan {
+  if (isObject(value)) {
+    checkKeys(value, ["variable"], path, "a variable binding");
+    return { variable: resources.requestVariable(string(value.variable, `${path}.variable`), "FLOAT", path) };
+  }
+  return number(value, path, min);
 }
 
 function planCommon(spec: Record<string, any>, plan: Plan, ctx: Context): void {
@@ -353,20 +484,23 @@ function planCommon(spec: Record<string, any>, plan: Plan, ctx: Context): void {
   }
 }
 
-function planBox(spec: Record<string, any>, plan: Plan): void {
+function planBox(spec: Record<string, any>, plan: Plan, ctx: Context): void {
   const { path } = plan;
-  if (spec.fill !== undefined) plan.fills = paints(spec.fill, `${path}.fill`);
-  if (spec.stroke !== undefined) plan.strokes = paints(spec.stroke, `${path}.stroke`);
-  if (spec.strokeWeight !== undefined) plan.strokeWeight = number(spec.strokeWeight, `${path}.strokeWeight`, 0, 1000);
+  const { resources } = ctx;
+  if (spec.fill !== undefined) plan.fills = planPaint(spec.fill, `${path}.fill`, resources, { image: true });
+  if (spec.stroke !== undefined) plan.strokes = planPaint(spec.stroke, `${path}.stroke`, resources);
+  if (spec.strokeWeight !== undefined) plan.strokeWeight = planNumber(spec.strokeWeight, `${path}.strokeWeight`, resources);
   if (spec.radius !== undefined) {
     const radius = spec.radius;
     if (Array.isArray(radius)) {
       if (radius.length !== 4) fail(`${path}.radius`, "an array needs 4 values: [topLeft, topRight, bottomRight, bottomLeft]");
-      plan.radius = radius.map((r, i) => number(r, `${path}.radius[${i}]`, 0)) as [number, number, number, number];
+      plan.radius = radius.map((r, i) => planNumber(r, `${path}.radius[${i}]`, resources)) as Plan["padding"];
     } else {
-      plan.radius = number(radius, `${path}.radius`, 0);
+      plan.radius = planNumber(radius, `${path}.radius`, resources);
     }
   }
+  if (spec.shadow !== undefined && spec.effectStyle !== undefined) fail(`${path}.effectStyle`, 'use either "shadow" or "effectStyle", not both');
+  if (spec.effectStyle !== undefined) plan.effectStyle = resources.requestStyle(string(spec.effectStyle, `${path}.effectStyle`), "EFFECT", `${path}.effectStyle`);
   if (spec.shadow !== undefined) {
     const list = spec.shadow === null ? [] : Array.isArray(spec.shadow) ? spec.shadow : [spec.shadow];
     plan.effects = list.map((shadow: unknown, i: number) => {
@@ -376,7 +510,13 @@ function planBox(spec: Record<string, any>, plan: Plan): void {
       for (const key of ["x", "y", "spread"]) if (shadow[key] !== undefined) number(shadow[key], `${shadowPath}.${key}`);
       if (shadow.blur !== undefined) number(shadow.blur, `${shadowPath}.blur`, 0);
       if (shadow.inner !== undefined) boolean(shadow.inner, `${shadowPath}.inner`);
-      if (shadow.color !== undefined) paints(string(shadow.color, `${shadowPath}.color`), `${shadowPath}.color`);
+      if (shadow.color !== undefined) {
+        try {
+          parseColor(string(shadow.color, `${shadowPath}.color`));
+        } catch (err) {
+          fail(`${shadowPath}.color`, errorMessage(err));
+        }
+      }
       return shadowEffect(shadow as ShadowSpec);
     });
   }
@@ -384,6 +524,7 @@ function planBox(spec: Record<string, any>, plan: Plan): void {
 
 function planFrame(spec: Record<string, any>, plan: Plan, ctx: Context): void {
   const { path } = plan;
+  const { resources } = ctx;
   if (spec.layout !== undefined) plan.layout = oneOf(spec.layout, LAYOUTS, `${path}.layout`);
   else if (ctx.creating) plan.layout = "VERTICAL";
   const layout = plan.layout || (ctx.existing && (ctx.existing as FrameNode).layoutMode) || "NONE";
@@ -393,15 +534,15 @@ function planFrame(spec: Record<string, any>, plan: Plan, ctx: Context): void {
 
   if (spec.gap !== undefined) {
     autoLayoutOnly("gap");
-    plan.gap = number(spec.gap, `${path}.gap`, 0);
+    plan.gap = planNumber(spec.gap, `${path}.gap`, resources);
   }
   if (spec.padding !== undefined) {
     autoLayoutOnly("padding");
     const p = spec.padding;
     const values = Array.isArray(p) ? p : [p];
     if ([1, 2, 4].indexOf(values.length) === -1) fail(`${path}.padding`, "must be a number, [vertical, horizontal] or [top, right, bottom, left]");
-    const n = values.map((v: unknown, i: number) => number(v, Array.isArray(p) ? `${path}.padding[${i}]` : `${path}.padding`, 0));
-    plan.padding = n.length === 1 ? [n[0], n[0], n[0], n[0]] : n.length === 2 ? [n[0], n[1], n[0], n[1]] : (n as [number, number, number, number]);
+    const n = values.map((v: unknown, i: number) => planNumber(v, Array.isArray(p) ? `${path}.padding[${i}]` : `${path}.padding`, resources));
+    plan.padding = n.length === 1 ? [n[0], n[0], n[0], n[0]] : n.length === 2 ? [n[0], n[1], n[0], n[1]] : (n as Plan["padding"]);
   }
   if (spec.align !== undefined) {
     autoLayoutOnly("align");
@@ -418,13 +559,16 @@ function planFrame(spec: Record<string, any>, plan: Plan, ctx: Context): void {
   }
   if (spec.rowGap !== undefined) {
     if (!plan.wrap && !(ctx.existing && (ctx.existing as FrameNode).layoutWrap === "WRAP")) fail(`${path}.rowGap`, "only applies with wrap: true");
-    plan.rowGap = number(spec.rowGap, `${path}.rowGap`, 0);
+    plan.rowGap = planNumber(spec.rowGap, `${path}.rowGap`, resources);
   }
   if (spec.clip !== undefined) plan.clip = boolean(spec.clip, `${path}.clip`);
 }
 
+const STYLE_CONFLICTS = ["font", "weight", "italic", "size", "lineHeight", "letterSpacing"];
+
 function planText(spec: Record<string, any>, plan: Plan, ctx: Context): void {
   const { path } = plan;
+  const { resources } = ctx;
   const text: TextPlan = {};
   plan.text = text;
 
@@ -432,11 +576,19 @@ function planText(spec: Record<string, any>, plan: Plan, ctx: Context): void {
   if (ctx.creating && spec.text === undefined && spec.spans === undefined) fail(path, 'a text node needs "text" (or "spans")');
   if (spec.text !== undefined) text.characters = string(spec.text, `${path}.text`);
 
+  if (spec.textStyle !== undefined) {
+    for (const key of STYLE_CONFLICTS) {
+      if (spec[key] !== undefined) fail(`${path}.${key}`, 'textStyle already sets the font, size, line height and letter spacing; remove this or the textStyle');
+    }
+    text.textStyle = resources.requestStyle(string(spec.textStyle, `${path}.textStyle`), "TEXT", `${path}.textStyle`);
+  }
+
   // Base font: when updating, unspecified parts come from the node's current font.
   let base: FontRequest = {};
   if (ctx.existing && ctx.existing.type === "TEXT") {
-    const fonts = safe(() => (ctx.existing as TextNode).getRangeAllFontNames(0, Math.max(1, (ctx.existing as TextNode).characters.length)));
-    const current = ctx.existing.fontName !== figma.mixed ? ctx.existing.fontName : fonts && fonts[0];
+    const node = ctx.existing;
+    const fonts = safe(() => node.getRangeAllFontNames(0, Math.max(1, node.characters.length)));
+    const current = node.fontName !== figma.mixed ? node.fontName : fonts && fonts[0];
     if (current) {
       const weight = weightOfStyle(current.style);
       base = { family: current.family, weight: weight !== undefined ? weight : current.style, italic: isItalicStyle(current.style) };
@@ -449,16 +601,18 @@ function planText(spec: Record<string, any>, plan: Plan, ctx: Context): void {
     if (problem) fail(`${path}.weight`, problem);
   }
   if (spec.italic !== undefined) boolean(spec.italic, `${path}.italic`);
-  const baseRequest: FontRequest = {
-    family: spec.font !== undefined ? spec.font : base.family,
-    weight: spec.weight !== undefined ? spec.weight : base.weight,
-    italic: spec.italic !== undefined ? spec.italic : base.italic,
-  };
-  if (ctx.creating || fontChange) text.font = ctx.resources.requestFont(baseRequest, path);
+  const baseRequest: FontRequest = text.textStyle
+    ? {}
+    : {
+        family: spec.font !== undefined ? spec.font : base.family,
+        weight: spec.weight !== undefined ? spec.weight : base.weight,
+        italic: spec.italic !== undefined ? spec.italic : base.italic,
+      };
+  if (!text.textStyle && (ctx.creating || fontChange)) text.font = resources.requestFont(baseRequest, path);
 
   if (spec.size !== undefined) text.size = number(spec.size, `${path}.size`, 1, 1000);
-  else if (ctx.creating) text.size = 16;
-  if (spec.color !== undefined) text.fills = paints(spec.color, `${path}.color`);
+  else if (ctx.creating && !text.textStyle) text.size = 16;
+  if (spec.color !== undefined) text.fills = planPaint(spec.color, `${path}.color`, resources);
   if (spec.lineHeight !== undefined) text.lineHeight = lineHeight(spec.lineHeight, `${path}.lineHeight`);
   if (spec.letterSpacing !== undefined) text.letterSpacing = letterSpacing(spec.letterSpacing, `${path}.letterSpacing`);
   if (spec.align !== undefined) text.align = oneOf(spec.align, TEXT_ALIGN, `${path}.align`);
@@ -481,17 +635,18 @@ function planText(spec: Record<string, any>, plan: Plan, ctx: Context): void {
           if (problem) fail(`${spanPath}.weight`, problem);
         }
         if (span.italic !== undefined) boolean(span.italic, `${spanPath}.italic`);
-        out.font = ctx.resources.requestFont(
+        out.font = resources.requestFont(
           {
             family: span.font !== undefined ? span.font : baseRequest.family,
             weight: span.weight !== undefined ? span.weight : baseRequest.weight,
             italic: span.italic !== undefined ? span.italic : baseRequest.italic,
           },
           spanPath,
+          span.font === undefined ? text.textStyle : undefined,
         );
       }
       if (span.size !== undefined) out.size = number(span.size, `${spanPath}.size`, 1, 1000);
-      if (span.color !== undefined) out.fills = paints(span.color, `${spanPath}.color`);
+      if (span.color !== undefined) out.fills = planPaint(span.color, `${spanPath}.color`, resources, { style: false });
       if (span.decoration !== undefined) out.decoration = oneOf(span.decoration, DECORATION, `${spanPath}.decoration`);
       return out;
     });
@@ -503,12 +658,167 @@ function planText(spec: Record<string, any>, plan: Plan, ctx: Context): void {
     const touchesSize = spec.width !== undefined || spec.height !== undefined;
     if (touchesText || touchesSize) {
       try {
-        ctx.resources.existingFonts.push(...fontsOfTextNode(ctx.existing));
+        resources.existingFonts.push(...fontsOfTextNode(ctx.existing));
       } catch (err) {
         fail(path, errorMessage(err));
       }
     }
   }
+}
+
+function friendlyName(fullName: string): string {
+  const hash = fullName.lastIndexOf("#");
+  return hash > 0 ? fullName.slice(0, hash) : fullName;
+}
+
+function findDefinition(
+  definitions: ComponentPropertyDefinitions,
+  name: string,
+): [string, ComponentPropertyDefinitions[string]] | undefined {
+  if (definitions[name]) return [name, definitions[name]];
+  const keys = Object.keys(definitions);
+  const exact = keys.find((key) => friendlyName(key) === name);
+  if (exact) return [exact, definitions[exact]];
+  const loose = keys.find((key) => friendlyName(key).toLowerCase() === name.toLowerCase());
+  return loose ? [loose, definitions[loose]] : undefined;
+}
+
+function describeDefinitions(definitions: ComponentPropertyDefinitions): string {
+  const keys = Object.keys(definitions);
+  if (keys.length === 0) return "it has no properties";
+  return keys
+    .map((key) => {
+      const def = definitions[key];
+      return def.type === "VARIANT"
+        ? `${friendlyName(key)} (variant: ${(def.variantOptions || []).join(" | ")})`
+        : `${friendlyName(key)} (${def.type.toLowerCase()})`;
+    })
+    .join(", ");
+}
+
+function stringRecord(value: unknown, path: string, allowBoolean: boolean): Record<string, any> {
+  if (!isObject(value)) fail(path, "must be an object of name → value");
+  for (const key of Object.keys(value)) {
+    const v = value[key];
+    if (typeof v !== "string" && !(allowBoolean && typeof v === "boolean")) {
+      fail(`${path}.${key}`, `must be a string${allowBoolean ? " or true/false" : ""}, got ${JSON.stringify(v)}`);
+    }
+  }
+  return value;
+}
+
+function planInstance(spec: Record<string, any>, plan: Plan, ctx: Context): void {
+  const { path } = plan;
+  const { resources } = ctx;
+  const instance: InstancePlan = {};
+  plan.instance = instance;
+  if (ctx.creating) {
+    if (spec.component === undefined) fail(path, 'an instance needs "component": a component name, id or library key');
+    instance.component = resources.requestComponent(string(spec.component, `${path}.component`), `${path}.component`);
+  }
+  if (spec.variant !== undefined) instance.variant = stringRecord(spec.variant, `${path}.variant`, false);
+  if (spec.props !== undefined) instance.props = stringRecord(spec.props, `${path}.props`, true);
+  if (spec.texts !== undefined) instance.texts = stringRecord(spec.texts, `${path}.texts`, false);
+  if (!ctx.creating && !instance.variant && !instance.props && !instance.texts) return;
+
+  const existing = ctx.existing as InstanceNode | undefined;
+  resources.after(async () => {
+    let main: ComponentNode | null;
+    let set: ComponentSetNode | null = null;
+    if (existing) {
+      main = await existing.getMainComponentAsync();
+      if (!main) fail(path, "the instance's main component is missing, so its properties cannot be changed");
+    } else {
+      const found = resources.component(instance.component as string);
+      main = found.type === "COMPONENT_SET" ? (found.defaultVariant as ComponentNode) : found;
+      if (found.type === "COMPONENT_SET") set = found;
+    }
+    if (!set && main.parent && main.parent.type === "COMPONENT_SET") set = main.parent as ComponentSetNode;
+    const label = `"${(set || main).name}"`;
+    const definitions = (set || main).componentPropertyDefinitions;
+
+    // Variant choices may come from `variant` or (leniently) from `props`.
+    const variantWanted: Record<string, string> = {};
+    const otherProps: Record<string, string | boolean> = {};
+    const variantSource = instance.variant || {};
+    if (!set && Object.keys(variantSource).length > 0) fail(`${path}.variant`, `${label} is a single component without variants`);
+    for (const name of Object.keys(variantSource)) {
+      const def = findDefinition(definitions, name);
+      if (!def || def[1].type !== "VARIANT") {
+        fail(`${path}.variant.${name}`, `${label} has no variant property "${name}"; ${describeDefinitions(definitions)}`);
+      }
+      variantWanted[def[0]] = variantSource[name];
+    }
+    const propsSource = instance.props || {};
+    for (const name of Object.keys(propsSource)) {
+      const def = findDefinition(definitions, name);
+      if (!def) fail(`${path}.props.${name}`, `${label} has no property "${name}"; ${describeDefinitions(definitions)}`);
+      const [fullName, definition] = def;
+      const value = propsSource[name];
+      if (definition.type === "VARIANT") variantWanted[fullName] = String(value);
+      else if (definition.type === "BOOLEAN" && typeof value !== "boolean") fail(`${path}.props.${name}`, "must be true or false");
+      else if (definition.type === "TEXT" && typeof value !== "string") fail(`${path}.props.${name}`, "must be a string");
+      else if (definition.type === "INSTANCE_SWAP") {
+        try {
+          const swap = await findComponent(String(value));
+          if (swap.type !== "COMPONENT") fail(`${path}.props.${name}`, "must name a single component, not a component set");
+          otherProps[fullName] = swap.id;
+        } catch (err) {
+          if (err instanceof SpecError) throw err;
+          fail(`${path}.props.${name}`, errorMessage(err));
+        }
+      } else otherProps[fullName] = value;
+    }
+
+    let target: ComponentNode = main;
+    const setProps: Record<string, string | boolean> = { ...otherProps };
+    if (Object.keys(variantWanted).length > 0) {
+      if (!set) fail(`${path}.variant`, `${label} is a single component without variants`);
+      for (const fullName of Object.keys(variantWanted)) {
+        const options = definitions[fullName].variantOptions || [];
+        if (options.indexOf(variantWanted[fullName]) === -1) {
+          fail(`${path}.variant.${friendlyName(fullName)}`, `"${variantWanted[fullName]}" is not an option; options: ${options.join(", ")}`);
+        }
+      }
+      const current = main.variantProperties || {};
+      const wanted: Record<string, string> = { ...current, ...variantWanted };
+      const match = set.children.find(
+        (child) => child.type === "COMPONENT" && Object.keys(wanted).every((key) => (child.variantProperties || {})[key] === wanted[key]),
+      ) as ComponentNode | undefined;
+      if (!match) {
+        fail(`${path}.variant`, `no variant of ${label} has ${JSON.stringify(wanted)}. Variants: ${set.children.slice(0, 12).map((c) => c.name).join("; ")}`);
+      }
+      target = match;
+      if (existing) Object.assign(setProps, variantWanted);
+    }
+    instance.source = target;
+    instance.setProps = setProps;
+
+    // Text overrides: check the layers exist and load their fonts.
+    const textRoot: ComponentNode | InstanceNode = existing && target === main ? existing : target;
+    instance.textOverrides = [];
+    const texts = instance.texts || {};
+    for (const layer of Object.keys(texts)) {
+      const node = textRoot.findOne((n) => n.type === "TEXT" && n.name === layer) as TextNode | null;
+      if (!node) {
+        const names = textLayerNames(textRoot);
+        fail(`${path}.texts.${layer}`, `no text layer named "${layer}"; text layers: ${names.length ? names.join(", ") : "none"}`);
+      }
+      try {
+        resources.existingFonts.push(...fontsOfTextNode(node));
+      } catch (err) {
+        fail(`${path}.texts.${layer}`, errorMessage(err));
+      }
+      instance.textOverrides.push([layer, texts[layer]]);
+    }
+    // Text properties rewrite text layers, which needs their fonts too.
+    if (Object.keys(setProps).some((key) => definitions[key] && definitions[key].type === "TEXT")) {
+      for (const node of textRoot.findAll((n) => n.type === "TEXT") as TextNode[]) {
+        const fonts = safe(() => fontsOfTextNode(node));
+        if (fonts) resources.existingFonts.push(...fonts);
+      }
+    }
+  });
 }
 
 function isAutoLayout(node: BaseNode | null | undefined): boolean {
@@ -538,7 +848,7 @@ function planSize(spec: Record<string, any>, plan: Plan, ctx: Context): void {
       plan[axis] = "fill";
     } else if (value === "hug") {
       if (!canHug) {
-        fail(at, isFrame ? '"hug" needs auto layout; set layout to "vertical" or "horizontal", or give a number' : `"hug" only applies to auto-layout frames and text`);
+        fail(at, isFrame ? '"hug" needs auto layout; set layout to "vertical" or "horizontal", or give a number' : `"hug" only applies to auto-layout frames, instances and text`);
       }
       plan[axis] = "hug";
     } else {
@@ -547,7 +857,7 @@ function planSize(spec: Record<string, any>, plan: Plan, ctx: Context): void {
   }
 
   if (!ctx.creating) {
-    if (plan.kind === "text" && typeof plan.height !== "undefined" && plan.height !== "hug" && plan.width === undefined) {
+    if (plan.kind === "text" && plan.height !== undefined && plan.height !== "hug" && plan.width === undefined) {
       const current = safe(() => (ctx.existing as TextNode).textAutoResize);
       if (current === "WIDTH_AND_HEIGHT") fail(`${path}.height`, "a text with a fixed height also needs a fixed or fill width");
     }
@@ -576,7 +886,7 @@ function planSize(spec: Record<string, any>, plan: Plan, ctx: Context): void {
       break;
     case "line":
       if (plan.width === undefined) {
-        if (!inAutoLayout) fail(path, 'a line outside auto layout needs a width');
+        if (!inAutoLayout) fail(path, "a line outside auto layout needs a width");
         plan.width = "fill";
       }
       if (plan.height === undefined) plan.height = 1;
@@ -597,7 +907,7 @@ function planNode(spec: unknown, path: string, ctx: Context): Plan {
   switch (type) {
     case "frame":
     case "component": {
-      planBox(spec, plan);
+      planBox(spec, plan, ctx);
       planFrame(spec, plan, ctx);
       planSize(spec, plan, ctx);
       if (spec.children !== undefined) {
@@ -614,13 +924,21 @@ function planNode(spec: unknown, path: string, ctx: Context): Plan {
     case "rect":
     case "ellipse":
     case "line":
-      planBox(spec, plan);
+      planBox(spec, plan, ctx);
       planSize(spec, plan, ctx);
       break;
     case "svg":
       plan.svg = string(spec.svg, `${path}.svg`);
       if (!/<svg[\s>]/i.test(plan.svg)) fail(`${path}.svg`, "must be SVG markup starting with <svg");
-      if (spec.color !== undefined) plan.svgFills = paints(spec.color, `${path}.color`);
+      if (spec.color !== undefined) {
+        const paint = planPaint(spec.color, `${path}.color`, ctx.resources, { style: false });
+        if (!("paints" in paint)) fail(`${path}.color`, 'must be a color such as "#4F46E5"');
+        plan.svgFills = paint.paints;
+      }
+      planSize(spec, plan, ctx);
+      break;
+    case "instance":
+      planInstance(spec, plan, ctx);
       planSize(spec, plan, ctx);
       break;
   }
@@ -634,7 +952,7 @@ function planUpdate(node: SceneNode, props: unknown, path: string, resources: Re
   checkKeys(props, UPDATE_KEYS[kind], `${path}.props`, `a ${node.type} node`);
   const parent = node.parent;
   const ctx: Context = {
-    parentLayout: parent && parent.type !== "PAGE" && isAutoLayout(parent) ? (parent as FrameNode).layoutMode as Layout : "NONE",
+    parentLayout: parent && parent.type !== "PAGE" && isAutoLayout(parent) ? ((parent as FrameNode).layoutMode as Layout) : "NONE",
     creating: false,
     existing: node,
     resources,
@@ -642,8 +960,9 @@ function planUpdate(node: SceneNode, props: unknown, path: string, resources: Re
   const plan: Plan = { path: `${path}.props`, kind };
   planCommon(props, plan, ctx);
   if (kind === "text") planText(props, plan, ctx);
-  else if (kind !== "group" && kind !== "svg") planBox(props, plan);
+  else if (kind !== "group" && kind !== "svg") planBox(props, plan, ctx);
   if (kind === "frame" || kind === "component" || kind === "instance") planFrame(props, plan, ctx);
+  if (kind === "instance") planInstance(props, plan, ctx);
   planSize(props, plan, ctx);
   return plan;
 }
@@ -699,8 +1018,8 @@ function applySize(node: SceneNode, plan: Plan, inAutoLayout: boolean): void {
   // 1. Axes becoming fixed switch to FIXED first. Resizing a FILL or HUG axis
   //    would otherwise be overridden by the old mode.
   if (canSetModes) {
-    if (fixedW !== undefined) setMode("width", width as number);
-    if (fixedH !== undefined) setMode("height", height as number);
+    if (fixedW !== undefined) setMode("width", fixedW);
+    if (fixedH !== undefined) setMode("height", fixedH);
   }
   // 2. Then the pixel size.
   if (fixedW !== undefined || fixedH !== undefined) {
@@ -717,39 +1036,69 @@ function applySize(node: SceneNode, plan: Plan, inAutoLayout: boolean): void {
   }
 }
 
-function applyBox(node: SceneNode, plan: Plan, creating: boolean): void {
-  const n = node as any;
-  if (plan.fills !== undefined) n.fills = plan.fills;
-  if (plan.strokes !== undefined) {
-    n.strokes = plan.strokes;
-    if (creating && plan.strokes.length > 0 && "strokeAlign" in n && node.type !== "LINE") n.strokeAlign = "INSIDE";
-    if (creating && plan.strokes.length > 0 && plan.strokeWeight === undefined) n.strokeWeight = 1;
+async function applyPaint(node: any, field: "fills" | "strokes", plan: PaintPlan, resources: Resources): Promise<void> {
+  if ("paints" in plan) {
+    node[field] = plan.paints;
+  } else if ("variable" in plan) {
+    node[field] = [figma.variables.setBoundVariableForPaint(solid(parseColor("#000000")), "color", resources.variable(plan.variable))];
+  } else {
+    const id = resources.style(plan.style).id;
+    if (field === "fills") await node.setFillStyleIdAsync(id);
+    else await node.setStrokeStyleIdAsync(id);
   }
-  if (plan.strokeWeight !== undefined) n.strokeWeight = plan.strokeWeight;
+}
+
+function applyNumber(node: any, field: VariableBindableNodeField, value: NumberPlan, resources: Resources): void {
+  if (typeof value === "number") node[field] = value;
+  else node.setBoundVariable(field, resources.variable(value.variable));
+}
+
+async function applyBox(node: SceneNode, plan: Plan, creating: boolean, resources: Resources): Promise<void> {
+  const n = node as any;
+  if (plan.fills !== undefined) await applyPaint(n, "fills", plan.fills, resources);
+  if (plan.strokes !== undefined) {
+    await applyPaint(n, "strokes", plan.strokes, resources);
+    if (creating && "strokeAlign" in n && node.type !== "LINE") n.strokeAlign = "INSIDE";
+    if (creating && plan.strokeWeight === undefined) n.strokeWeight = 1;
+  }
+  if (plan.strokeWeight !== undefined) applyNumber(n, "strokeWeight", plan.strokeWeight, resources);
   if (plan.radius !== undefined) {
     if (Array.isArray(plan.radius)) {
-      [n.topLeftRadius, n.topRightRadius, n.bottomRightRadius, n.bottomLeftRadius] = plan.radius;
-    } else {
+      const corners: VariableBindableNodeField[] = ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"];
+      corners.forEach((corner, i) => applyNumber(n, corner, (plan.radius as NumberPlan[])[i], resources));
+    } else if (typeof plan.radius === "number") {
       n.cornerRadius = plan.radius;
+    } else {
+      for (const corner of ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"] as VariableBindableNodeField[]) {
+        applyNumber(n, corner, plan.radius, resources);
+      }
     }
   }
   if (plan.effects !== undefined) n.effects = plan.effects;
+  if (plan.effectStyle !== undefined) await n.setEffectStyleIdAsync(resources.style(plan.effectStyle).id);
 }
 
-function applyFrame(node: FrameNode | ComponentNode | InstanceNode, plan: Plan): void {
+function applyFrame(node: FrameNode | ComponentNode | InstanceNode, plan: Plan, resources: Resources): void {
   if (plan.layout !== undefined && node.layoutMode !== plan.layout) node.layoutMode = plan.layout;
-  if (plan.gap !== undefined) node.itemSpacing = plan.gap;
+  if (plan.gap !== undefined) applyNumber(node, "itemSpacing", plan.gap, resources);
   if (plan.padding !== undefined) {
-    [node.paddingTop, node.paddingRight, node.paddingBottom, node.paddingLeft] = plan.padding;
+    const sides: VariableBindableNodeField[] = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
+    sides.forEach((side, i) => applyNumber(node, side, (plan.padding as NumberPlan[])[i], resources));
   }
   if (plan.align !== undefined) node.primaryAxisAlignItems = plan.align;
   if (plan.crossAlign !== undefined) node.counterAxisAlignItems = plan.crossAlign;
   if (plan.wrap !== undefined) node.layoutWrap = plan.wrap ? "WRAP" : "NO_WRAP";
-  if (plan.rowGap !== undefined) node.counterAxisSpacing = plan.rowGap;
+  if (plan.rowGap !== undefined) applyNumber(node, "counterAxisSpacing", plan.rowGap, resources);
   if (plan.clip !== undefined) node.clipsContent = plan.clip;
 }
 
-function applyText(node: TextNode, text: TextPlan, resources: Resources): void {
+async function applyText(node: TextNode, text: TextPlan, resources: Resources): Promise<void> {
+  if (text.textStyle) {
+    const style = resources.style(text.textStyle) as TextStyle;
+    // Switch to the style's (loaded) font before linking, then set the text.
+    if (node.characters.length === 0) node.fontName = style.fontName;
+    await node.setTextStyleIdAsync(style.id);
+  }
   if (text.font) node.fontName = resources.font(text.font);
   if (text.characters !== undefined) node.characters = text.characters;
   if (text.size !== undefined) node.fontSize = text.size;
@@ -757,7 +1106,7 @@ function applyText(node: TextNode, text: TextPlan, resources: Resources): void {
   if (text.letterSpacing !== undefined) node.letterSpacing = text.letterSpacing;
   if (text.align !== undefined) node.textAlignHorizontal = text.align;
   if (text.decoration !== undefined) node.textDecoration = text.decoration;
-  if (text.fills !== undefined) node.fills = text.fills;
+  if (text.fills !== undefined) await applyPaint(node, "fills", text.fills, resources);
   if (text.spans) {
     let offset = 0;
     for (const span of text.spans) {
@@ -766,9 +1115,23 @@ function applyText(node: TextNode, text: TextPlan, resources: Resources): void {
       if (end === start) continue;
       if (span.font) node.setRangeFontName(start, end, resources.font(span.font));
       if (span.size !== undefined) node.setRangeFontSize(start, end, span.size);
-      if (span.fills !== undefined) node.setRangeFills(start, end, span.fills);
+      if (span.fills !== undefined) {
+        const paints =
+          "paints" in span.fills
+            ? span.fills.paints
+            : [figma.variables.setBoundVariableForPaint(solid(parseColor("#000000")), "color", resources.variable((span.fills as { variable: string }).variable))];
+        node.setRangeFills(start, end, paints);
+      }
       if (span.decoration !== undefined) node.setRangeTextDecoration(start, end, span.decoration);
     }
+  }
+}
+
+function applyInstance(node: InstanceNode, instance: InstancePlan): void {
+  if (instance.setProps && Object.keys(instance.setProps).length > 0) node.setProperties(instance.setProps);
+  for (const [layer, value] of instance.textOverrides || []) {
+    const text = node.findOne((n) => n.type === "TEXT" && n.name === layer) as TextNode | null;
+    if (text) text.characters = value;
   }
 }
 
@@ -781,22 +1144,22 @@ function recolor(root: SceneNode, fills: Paint[]): void {
   }
 }
 
-function createNode(plan: Plan, resources: Resources, topLevel: boolean): SceneNode {
+async function createNode(plan: Plan, resources: Resources, topLevel: boolean): Promise<SceneNode> {
   switch (plan.kind) {
     case "frame":
     case "component": {
       const frame = plan.kind === "component" ? figma.createComponent() : figma.createFrame();
       frame.name = plan.name || (plan.kind === "component" ? "Component" : "Frame");
       // New frames: white and clipped at the top level, transparent and unclipped inside others.
-      frame.fills = plan.fills !== undefined ? plan.fills : topLevel ? [solid(parseColor("#FFFFFF"))] : [];
+      if (plan.fills === undefined) frame.fills = topLevel ? [solid(parseColor("#FFFFFF"))] : [];
       frame.clipsContent = topLevel;
-      applyFrame(frame, plan);
-      applyBox(frame, { ...plan, fills: undefined }, true);
+      applyFrame(frame, plan, resources);
+      await applyBox(frame, plan, true, resources);
       return frame;
     }
     case "text": {
       const text = figma.createText();
-      applyText(text, plan.text as TextPlan, resources);
+      await applyText(text, plan.text as TextPlan, resources);
       text.name = plan.name || (text.characters.length > 40 ? text.characters.slice(0, 40) + "…" : text.characters) || "Text";
       return text;
     }
@@ -804,13 +1167,13 @@ function createNode(plan: Plan, resources: Resources, topLevel: boolean): SceneN
     case "line": {
       const rect = figma.createRectangle();
       rect.name = plan.name || (plan.kind === "line" ? "Line" : "Rectangle");
-      applyBox(rect, plan, true);
+      await applyBox(rect, plan, true, resources);
       return rect;
     }
     case "ellipse": {
       const ellipse = figma.createEllipse();
       ellipse.name = plan.name || "Ellipse";
-      applyBox(ellipse, plan, true);
+      await applyBox(ellipse, plan, true, resources);
       return ellipse;
     }
     case "svg": {
@@ -819,6 +1182,12 @@ function createNode(plan: Plan, resources: Resources, topLevel: boolean): SceneN
       svg.fills = [];
       if (plan.svgFills) recolor(svg, plan.svgFills);
       return svg;
+    }
+    case "instance": {
+      const instancePlan = plan.instance as InstancePlan;
+      const instance = (instancePlan.source as ComponentNode).createInstance();
+      applyInstance(instance, instancePlan);
+      return instance;
     }
     default:
       throw new Error(`cannot create ${plan.kind}`);
@@ -839,9 +1208,15 @@ function applyPosition(node: SceneNode, plan: Plan): void {
   if (plan.y !== undefined) node.y = plan.y;
 }
 
-function buildPlan(plan: Plan, parent: Container, index: number | undefined, resources: Resources, created: CreatedNode[]): SceneNode {
+async function buildPlan(
+  plan: Plan,
+  parent: Container,
+  index: number | undefined,
+  resources: Resources,
+  created: CreatedNode[],
+): Promise<SceneNode> {
   const topLevel = parent.type === "PAGE";
-  const node = createNode(plan, resources, topLevel);
+  const node = await createNode(plan, resources, topLevel);
   applyCommon(node, plan);
   if (index !== undefined) parent.insertChild(index, node);
   else parent.appendChild(node);
@@ -851,7 +1226,7 @@ function buildPlan(plan: Plan, parent: Container, index: number | undefined, res
   if (plan.x !== undefined) node.x = plan.x;
   if (plan.y !== undefined) node.y = plan.y;
   created.push({ path: plan.path, id: node.id, name: node.name, type: node.type });
-  for (const child of plan.children || []) buildPlan(child, node as FrameNode, undefined, resources, created);
+  for (const child of plan.children || []) await buildPlan(child, node as FrameNode, undefined, resources, created);
   return node;
 }
 
@@ -868,17 +1243,17 @@ export function freeSpot(page: PageNode): { x: number; y: number } {
   return right === -Infinity ? { x: 0, y: 0 } : { x: Math.round(right + 100), y: Math.round(top) };
 }
 
-async function resolveParent(parentId: string | undefined): Promise<Container> {
+export async function resolveParent(parentId: string | undefined, label = "parentId"): Promise<Container> {
   if (parentId === undefined) return figma.currentPage;
   const parent = await figma.getNodeByIdAsync(parentId);
-  if (!parent) fail("parentId", `no node with id "${parentId}" exists in this file`);
+  if (!parent) fail(label, `no node with id "${parentId}" exists in this file`);
   if (parent.type === "PAGE") {
     await parent.loadAsync();
     return parent;
   }
-  if (parent.type === "INSTANCE") fail("parentId", "nodes cannot be added inside an instance; add them to its main component or detach it");
-  if (parent.type === "COMPONENT_SET") fail("parentId", "a component set can only contain variants; build a component and add it with execute_code");
-  if (!("appendChild" in parent)) fail("parentId", `a ${parent.type} cannot contain other nodes`);
+  if (parent.type === "INSTANCE") fail(label, "nodes cannot be added inside an instance; add them to its main component or detach it");
+  if (parent.type === "COMPONENT_SET") fail(label, "a component set can only contain variants; build a component and add it with execute_code");
+  if (!("appendChild" in parent)) fail(label, `a ${parent.type} cannot contain other nodes`);
   return parent as Container;
 }
 
@@ -894,13 +1269,13 @@ export async function buildDesign(params: { spec: unknown; parentId?: string; in
     if (!Number.isInteger(params.index) || params.index < 0 || params.index > max) fail("index", `must be a whole number from 0 to ${max}`);
   }
   const resources = new Resources();
-  const parentLayout: Layout = parent.type !== "PAGE" && isAutoLayout(parent) ? (parent as FrameNode).layoutMode as Layout : "NONE";
+  const parentLayout: Layout = parent.type !== "PAGE" && isAutoLayout(parent) ? ((parent as FrameNode).layoutMode as Layout) : "NONE";
   const plan = planNode(params.spec, "spec", { parentLayout, creating: true, resources });
   await resources.resolve();
 
   const spot = parent.type === "PAGE" && plan.x === undefined && plan.y === undefined ? freeSpot(parent as PageNode) : undefined;
   const created: CreatedNode[] = [];
-  const root = buildPlan(plan, parent, params.index, resources, created);
+  const root = await buildPlan(plan, parent, params.index, resources, created);
   if (spot) {
     root.x = spot.x;
     root.y = spot.y;
@@ -930,11 +1305,12 @@ export async function updateNodes(
 
   for (const { node, plan } of items) {
     applyCommon(node, plan);
-    if (node.type === "TEXT") applyText(node, plan.text as TextPlan, resources);
-    else applyBox(node, plan, false);
+    if (node.type === "TEXT") await applyText(node, plan.text as TextPlan, resources);
+    else await applyBox(node, plan, false, resources);
     if (node.type === "FRAME" || node.type === "COMPONENT" || node.type === "INSTANCE" || node.type === "COMPONENT_SET") {
-      applyFrame(node as FrameNode, plan);
+      applyFrame(node as FrameNode, plan, resources);
     }
+    if (node.type === "INSTANCE" && plan.instance) applyInstance(node, plan.instance);
     applyPosition(node, plan);
     const parent = node.parent;
     applySize(node, plan, !!parent && parent.type !== "PAGE" && isAutoLayout(parent) && (node as any).layoutPositioning !== "ABSOLUTE");

@@ -6,6 +6,8 @@ import { BUILD_TIMEOUT_MS, PLUGIN_VERSION, type CommandMessage, type CommandName
 import { buildDesign, describeCreated, updateNodes } from "./builder";
 import { executeCode } from "./execute";
 import { exportNode, findNodeIn, isWindowHidden, screenshotOf, setWindowHidden, topLevelOf } from "./export";
+import { placeImage } from "./images";
+import { getComponents, libraryVariables, librarySnapshot } from "./library";
 import { runMutation } from "./mutation";
 import { MAX_CHILDREN, serializeEffect, serializeNode, serializePaints, serializeVariableValue, summarize } from "./serialize";
 import { clampDepth, errorMessage, requireNode, type Json } from "./util";
@@ -69,6 +71,8 @@ const handlers: Handlers = {
 
   get_node: async (params) => serializeNode(await requireNode(params.nodeId), clampDepth(params.depth)),
   get_styles: getStyles,
+  get_components: getComponents,
+  library_snapshot: librarySnapshot,
   export_node: exportNode,
 
   // Commands that change the document go through runMutation: one at a time,
@@ -104,6 +108,12 @@ const handlers: Handlers = {
     const out: Json = { updated: nodes.map(summarize) };
     if (params.screenshot) out.screenshot = await screenshotOf(topLevelOf(nodes[0]));
     return out;
+  },
+
+  place_image: async (params) => {
+    const placed = await runMutation(() => placeImage(params), BUILD_TIMEOUT_MS);
+    if (params.screenshot) placed.json.screenshot = await screenshotOf(topLevelOf(placed.node));
+    return placed.json;
   },
 };
 
@@ -172,5 +182,6 @@ async function getStyles(params: CommandParams["get_styles"]): Promise<Json> {
         }),
     }));
   }
+  if (params.includeLibraries) out.libraryVariables = await libraryVariables();
   return out;
 }

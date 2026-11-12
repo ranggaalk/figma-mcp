@@ -39,7 +39,10 @@ Agent ⇄ MCP (stdio) ⇄ dist/server.js ⇄ WebSocket localhost:3055 ⇄ plugin
 | `get_document_info` | Daftar halaman dan node tingkat atas di halaman aktif |
 | `get_selection` | Detail node yang sedang dipilih |
 | `get_node` | Detail satu node berdasarkan id |
-| `get_styles` | Style lokal (warna, teks, efek) dan variable |
+| `get_styles` | Style lokal (warna, teks, efek) dan variable; opsional variable library tim dan style dari katalog |
+| `get_components` | Komponen dan component set beserta properti dan variant-nya, komponen library yang sudah dipakai, dan isi katalog library |
+| `save_library_catalog` | Menyimpan key komponen dan style file library ini, supaya bisa dipakai dari file lain |
+| `place_image` | Memasukkan file PNG/JPEG/GIF sebagai rectangle baru atau sebagai fill node |
 | `export_node` | Render node ke PNG supaya agent bisa melihat hasilnya |
 | `build_design` | Membuat frame beserta seluruh isinya dari satu spec JSON |
 | `update_nodes` | Mengubah properti node yang sudah ada dengan format yang sama |
@@ -68,6 +71,31 @@ Satu spec menggambarkan satu pohon node:
 
 Di dalam `execute_code`, objek `h` menyediakan builder yang sama: `h.build`, `h.apply`, `h.setText`, `h.font`, `h.paint`, dan `h.color`.
 
+### Design system
+
+Spec bisa memakai token dan komponen file, alih-alih nilai mentah:
+
+```json
+{"type":"frame","fill":{"variable":"color/surface"},"gap":{"variable":"spacing/4"},"effectStyle":"Shadow/Card","children":[
+  {"type":"text","text":"Pengaturan","textStyle":"Heading/H2"},
+  {"type":"instance","component":"Button","variant":{"Size":"Large"},"props":{"Label":"Simpan"}}
+]}
+```
+
+- **Variable:** `{ "variable": "nama" }` untuk warna (fill, stroke, warna teks) dan angka (gap, padding, radius, strokeWeight). Nama boleh `Koleksi/nama`, id, atau key library.
+- **Style:** `{ "style": "nama" }` untuk paint style, `textStyle` untuk teks, `effectStyle` untuk bayangan.
+- **Instance:** `type: "instance"` dengan `component` (nama, id, atau key), `variant`, `props` (properti teks/boolean/swap), dan `texts` (override layer teks berdasarkan nama).
+- **Gambar:** `place_image` mengembalikan `imageHash` yang bisa dipakai lagi sebagai `fill: { "image": "<hash>" }`.
+- Kesalahan menyebut pilihan yang tersedia, misalnya opsi variant, daftar properti, atau nama variable yang mirip.
+
+#### Library tim
+
+Plugin API tidak bisa melihat isi library, tapi bisa mengimpor berdasarkan key.
+
+- **Variable library:** langsung bisa dipakai lewat nama (izin `teamlibrary`).
+- **Komponen dan style library:** buka file library sekali, jalankan plugin, lalu minta agent memanggil `save_library_catalog`. Katalog disimpan di `~/.figma-mcp-bridge/libraries/` (bisa diubah dengan `FIGMA_BRIDGE_DATA_DIR`). Setelah itu `get_components` dan `get_styles` di file lain menampilkan isinya beserta key, dan builder mengimpornya saat dipakai. Hanya item yang sudah dipublish yang bisa diimpor.
+- **Komponen library yang sudah dipakai di file** langsung terdeteksi dari instance-nya.
+
 Kode untuk `execute_code` diturunkan ke ES2017 di server sebelum dikirim, jadi agent boleh memakai sintaks modern atau TypeScript.
 
 ### Keamanan
@@ -83,7 +111,7 @@ Catatan teknis: di Figma, `triggerUndo()` membatalkan perubahan yang belum di-co
 ## Masalah umum
 
 - **Plugin terus "Waiting for MCP server…"**: agent belum berjalan, atau Windows tidak bisa menjangkau `localhost:3055` di WSL. Untuk kasus kedua, aktifkan `networkingMode=mirrored` di `%UserProfile%\.wslconfig` lalu `wsl --shutdown`.
-- **`export_node` gagal dengan "Figma did not finish rendering"**: jendela Figma sedang diminimize atau tertutup penuh oleh jendela lain, dan Figma berhenti me-render di latar belakang. Taruh Figma berdampingan dengan terminal. Tool lain tetap jalan di latar belakang, hanya lebih lambat.
+- **`export_node` gagal dengan "Figma did not finish rendering"**: jendela Figma sedang diminimize atau tertutup penuh oleh jendela lain, dan Figma berhenti me-render di latar belakang. Taruh Figma berdampingan dengan terminal. Tool lain tetap jalan di latar belakang, hanya lebih lambat, kecuali pindah halaman (`figma.setCurrentPageAsync`), yang menunggu sampai jendela terlihat lagi.
 - **"Port 3055 is already in use"**: ada sesi agent lain yang menjalankan server ini. Tutup salah satunya.
 - **Ganti port**: ubah di tiga tempat, yaitu env `FIGMA_BRIDGE_PORT`, `WS_URL` di `plugin/ui.html`, dan `devAllowedDomains` di `plugin/manifest.json`.
 
