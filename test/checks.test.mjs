@@ -118,6 +118,31 @@ test("finds clipped content and children sticking out of auto layout", async () 
   assert.equal(report.issues.find((i) => i.rule === "overflow").nodeId, ids.big);
 });
 
+test("finds children cut off by a component set left at a fixed height", async () => {
+  // Found in Figma: turning on auto layout with padding for a component set
+  // kept its old height, cutting the variants off. Render bounds of clipped
+  // content are already clipped, so only the layout box shows the problem.
+  const ids = screen((s) => {
+    const a = figma.createComponent();
+    a.name = "Variant=A";
+    a.resize(90, 46);
+    const b = figma.createComponent();
+    b.name = "Variant=B";
+    b.resize(90, 46);
+    const set = figma.combineAsVariants([a, b], s);
+    set.name = "Button";
+    set.resize(212, 48);
+    set.layoutMode = "HORIZONTAL";
+    set.layoutSizingVertical = "FIXED";
+    set.paddingTop = set.paddingBottom = set.paddingLeft = set.paddingRight = 16;
+    set.itemSpacing = 16;
+    return { a: a.id };
+  });
+  const report = await check(ids.screen);
+  const clipped = report.issues.filter((i) => i.rule === "clipped");
+  assert.ok(clipped.some((i) => i.nodeId === ids.a), JSON.stringify(report.issues));
+});
+
 test("shadows that extend past a parent are not overflow", async () => {
   // Found in Figma: cards with a drop shadow were reported as sticking out,
   // because render bounds include the shadow.
@@ -229,7 +254,9 @@ test("default layer names are reported, instance contents are not", async () => 
 test("build_design and update_nodes report problems right away", async () => {
   const bad = jsonOf(
     await server.call("build_design", {
-      spec: { type: "frame", children: [{ type: "text", text: "Far too much text for this tiny box", width: 60, height: 10 }] },
+      // The frame is taller than the text box, so the overflow is drawn (a clipping
+      // edge exactly at the text's edge would hide it from render bounds too).
+      spec: { type: "frame", height: 200, children: [{ type: "text", text: "Far too much text for this tiny box", width: 60, height: 10 }] },
     }),
   );
   assert.equal(bad.check.problems[0].rule, "text-overflow");

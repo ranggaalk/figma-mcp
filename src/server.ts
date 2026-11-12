@@ -481,6 +481,7 @@ server.registerTool(
     description: [
       "Change properties of existing nodes using the build_design format, in a single undo step. All updates are checked before any is applied.",
       "Which props apply depends on the node: frames take layout/gap/padding/align/fill/stroke/radius/shadow…, text takes text/spans/font/weight/size/color/align…, shapes take fill/stroke/radius. width/height/name/x/y/opacity/visible work on all.",
+      'When turning on layout for a frame that had none, also give width/height ("hug" to fit the content): Figma otherwise keeps the cross-axis size fixed, which can cut content off.',
       'Example: {"updates":[{"nodeId":"12:34","props":{"fill":"#F8FAFC","padding":[16,24]}},{"nodeId":"12:40","props":{"text":"Save changes","weight":600}}]}',
     ].join("\n"),
     inputSchema: {

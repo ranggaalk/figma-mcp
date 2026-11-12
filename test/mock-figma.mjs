@@ -311,7 +311,17 @@ export function createMockFigma(options = {}) {
           y2 = Math.max(y2, r.y + r.height);
         }
       }
-      return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+      // Observed in Figma: what a clipping ancestor hides is not part of the
+      // render bounds.
+      for (let a = this._parent; a && a.type !== "PAGE" && a.type !== "DOCUMENT"; a = a._parent) {
+        if (a._p.clipsContent !== true) continue;
+        const c = a.absoluteBoundingBox;
+        x1 = Math.max(x1, c.x);
+        y1 = Math.max(y1, c.y);
+        x2 = Math.min(x2, c.x + c.width);
+        y2 = Math.min(y2, c.y + c.height);
+      }
+      return { x: x1, y: y1, width: Math.max(0, x2 - x1), height: Math.max(0, y2 - y1) };
     },
     get effectStyleId() {
       return this._p.effectStyleId ?? "";

@@ -207,6 +207,8 @@ class Checker {
       this.add("error", "missing-font", node, "Uses a font that is not installed, so it cannot be edited and may render differently.", "Switch to an installed font.");
       return;
     }
+    // Render bounds show glyphs past the box, except where a clipping frame
+    // already hides them; overflow exactly at a clipping edge goes unnoticed.
     const truncates = safe(() => (node as any).textTruncation) === "ENDING";
     if (node.textAutoResize === "NONE" && !truncates) {
       const render = (node as any).absoluteRenderBounds as Box | null;
