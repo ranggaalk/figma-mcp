@@ -2,7 +2,7 @@
 // Keep this file free of Node and Figma APIs: types and constants only.
 
 /** Version of the plugin this server was built with. Both sides must match. */
-export const PLUGIN_VERSION = "0.4.1";
+export const PLUGIN_VERSION = "0.4.2";
 
 export const DEFAULT_PORT = 3055;
 

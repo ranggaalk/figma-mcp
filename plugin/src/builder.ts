@@ -408,7 +408,7 @@ interface Plan {
   clip?: boolean;
   text?: TextPlan;
   svg?: string;
-  svgFills?: Paint[];
+  svgColor?: PaintPlan;
   instance?: InstancePlan;
   children?: Plan[];
 }
@@ -930,11 +930,7 @@ function planNode(spec: unknown, path: string, ctx: Context): Plan {
     case "svg":
       plan.svg = string(spec.svg, `${path}.svg`);
       if (!/<svg[\s>]/i.test(plan.svg)) fail(`${path}.svg`, "must be SVG markup starting with <svg");
-      if (spec.color !== undefined) {
-        const paint = planPaint(spec.color, `${path}.color`, ctx.resources, { style: false });
-        if (!("paints" in paint)) fail(`${path}.color`, 'must be a color such as "#4F46E5"');
-        plan.svgFills = paint.paints;
-      }
+      if (spec.color !== undefined) plan.svgColor = planPaint(spec.color, `${path}.color`, ctx.resources);
       planSize(spec, plan, ctx);
       break;
     case "instance":
@@ -1135,12 +1131,14 @@ function applyInstance(node: InstanceNode, instance: InstancePlan): void {
   }
 }
 
-function recolor(root: SceneNode, fills: Paint[]): void {
+/** Gives every filled or stroked shape of an icon the same color, variable or style. */
+async function recolor(root: SceneNode, color: PaintPlan, resources: Resources): Promise<void> {
   const nodes = "findAll" in root ? (root as FrameNode).findAll() : [];
+  const painted = (paints: unknown) => Array.isArray(paints) && paints.some((p: Paint) => p.type === "SOLID" && p.visible !== false);
   for (const node of nodes) {
     const n = node as any;
-    if (Array.isArray(n.fills) && n.fills.some((p: Paint) => p.type === "SOLID" && p.visible !== false)) n.fills = fills;
-    if (Array.isArray(n.strokes) && n.strokes.some((p: Paint) => p.type === "SOLID" && p.visible !== false)) n.strokes = fills;
+    if (painted(n.fills)) await applyPaint(n, "fills", color, resources);
+    if (painted(n.strokes)) await applyPaint(n, "strokes", color, resources);
   }
 }
 
@@ -1180,7 +1178,7 @@ async function createNode(plan: Plan, resources: Resources, topLevel: boolean): 
       const svg = figma.createNodeFromSvg(plan.svg as string);
       svg.name = plan.name || "Icon";
       svg.fills = [];
-      if (plan.svgFills) recolor(svg, plan.svgFills);
+      if (plan.svgColor) await recolor(svg, plan.svgColor, resources);
       return svg;
     }
     case "instance": {

@@ -109,7 +109,7 @@ const props = {
   weight: weight.optional(),
   italic: z.boolean().optional(),
   size: z.number().optional().describe("Text: font size, default 16."),
-  color: paint.optional().describe("Text: color (default black). Svg: recolors every shape."),
+  color: paint.optional().describe("Text: color (default black). Svg: recolors every shape; a variable or style keeps icons on the design system."),
   lineHeight: z
     .union([z.number(), z.string()])
     .optional()

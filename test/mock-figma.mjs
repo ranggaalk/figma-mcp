@@ -285,12 +285,33 @@ export function createMockFigma(options = {}) {
       return { x, y, width: this.width, height: this.height };
     },
     get absoluteRenderBounds() {
-      const box = this.absoluteBoundingBox;
+      // Like Figma: drawn area, so glyphs that overflow, drop shadows, and
+      // unclipped children all count.
+      let box = this.absoluteBoundingBox;
       if (this.type === "TEXT") {
         const natural = textNaturalSize(this, this._p.textAutoResize === "WIDTH_AND_HEIGHT" ? undefined : box.width);
-        return { ...box, height: Math.max(box.height, natural.height) };
+        box = { ...box, height: Math.max(box.height, natural.height) };
       }
-      return box;
+      let [x1, y1, x2, y2] = [box.x, box.y, box.x + box.width, box.y + box.height];
+      for (const effect of this._p.effects ?? []) {
+        if (effect.type !== "DROP_SHADOW" || effect.visible === false) continue;
+        const spread = (effect.radius ?? 0) + (effect.spread ?? 0);
+        x1 = Math.min(x1, box.x + effect.offset.x - spread);
+        y1 = Math.min(y1, box.y + effect.offset.y - spread);
+        x2 = Math.max(x2, box.x + box.width + effect.offset.x + spread);
+        y2 = Math.max(y2, box.y + box.height + effect.offset.y + spread);
+      }
+      if (this._children && this._p.clipsContent !== true) {
+        for (const child of this._children) {
+          if (child._p.visible === false) continue;
+          const r = child.absoluteRenderBounds;
+          x1 = Math.min(x1, r.x);
+          y1 = Math.min(y1, r.y);
+          x2 = Math.max(x2, r.x + r.width);
+          y2 = Math.max(y2, r.y + r.height);
+        }
+      }
+      return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
     },
     get effectStyleId() {
       return this._p.effectStyleId ?? "";

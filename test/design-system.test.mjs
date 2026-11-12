@@ -218,6 +218,19 @@ test("colors, spacing and radii bind to variables; styles apply by name", async 
   assert.ok(title.boundVariables.fills);
 });
 
+test("svg icons take a color variable", async () => {
+  // Found in Figma: icons could only take hex colors, so check_design then
+  // reported them as unlinked tokens.
+  const svg = '<svg width="24" height="24" viewBox="0 0 24 24"><path d="M4 12h16" stroke="#000"/></svg>';
+  const result = await build({ type: "frame", fill: null, children: [{ type: "svg", svg, width: 20, color: { variable: "color/surface" } }] });
+  assert.equal(result.isError, undefined, textOf(result));
+  const out = jsonOf(result);
+  assert.equal(out.check, undefined, "nothing unlinked to report");
+  const vector = (await node(out.nodes[1].id)).children[0];
+  assert.match(vector.boundVariables.strokes[0].id, /^VariableID:/);
+  assert.match(vector.boundVariables.fills[0].id, /^VariableID:/);
+});
+
 test("token mistakes are explained", async () => {
   const cases = [
     [{ type: "frame", fill: { variable: "spacing/4" } }, /variable "spacing\/4" is a FLOAT variable, but this property needs a color \(COLOR\) variable/],

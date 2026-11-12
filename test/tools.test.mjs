@@ -142,7 +142,7 @@ test("export_node returns a PNG and respects maxSize", async () => {
   assert.ok(Buffer.from(image.data, "base64").equals(PNG_1X1));
   assert.equal(JSON.parse(result.content[1].text).scale, 1.25);
   assert.equal(JSON.parse((await server.call("export_node")).content[1].text).nodeId, ids.card, "defaults to the selection");
-  assert.equal(JSON.parse((await server.call("export_node", { nodeId: "0:1" })).content[1].text).width, 320, "a page uses its content bounds");
+  assert.equal(JSON.parse((await server.call("export_node", { nodeId: "0:1" })).content[1].text).width, 336, "a page uses its drawn bounds, shadow included");
 });
 
 test("export fails fast with an explanation while the Figma window is hidden", async () => {

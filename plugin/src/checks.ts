@@ -181,7 +181,9 @@ class Checker {
         for (const child of (node as FrameNode).children) {
           if (child.visible === false) continue;
           if (!clips && (child as any).layoutPositioning === "ABSOLUTE") continue;
-          const childBox = boxOf(child, true);
+          // Render bounds include shadows and other effects, which may extend past
+          // a parent by design; only for text do they show real overflow (glyphs).
+          const childBox = boxOf(child, child.type === "TEXT");
           if (!childBox || !sticksOut(childBox, box)) continue;
           if (clips) {
             this.add("warning", "clipped", child, `Partly hidden: it extends past "${node.name}", which clips its content.`, "Make the parent hug its content, enlarge it, or let the child fill it.");

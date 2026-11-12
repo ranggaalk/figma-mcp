@@ -118,6 +118,31 @@ test("finds clipped content and children sticking out of auto layout", async () 
   assert.equal(report.issues.find((i) => i.rule === "overflow").nodeId, ids.big);
 });
 
+test("shadows that extend past a parent are not overflow", async () => {
+  // Found in Figma: cards with a drop shadow were reported as sticking out,
+  // because render bounds include the shadow.
+  const out = jsonOf(
+    await server.call("build_design", {
+      spec: {
+        type: "frame",
+        width: 390,
+        padding: 24,
+        children: [
+          {
+            type: "frame",
+            name: "Section",
+            width: "fill",
+            children: [{ type: "frame", name: "Card", width: "fill", padding: 16, shadow: { y: 2, blur: 8 }, children: [{ type: "text", text: "Row" }] }],
+          },
+        ],
+      },
+    }),
+  );
+  assert.equal(out.check, undefined, JSON.stringify(out.check));
+  const card = await figma.getNodeByIdAsync(out.nodes[2].id);
+  assert.ok(card.absoluteRenderBounds.width > card.width, "the mock draws the shadow outside the box, as Figma does");
+});
+
 test("flags low text contrast against the background it sits on", async () => {
   const ids = screen((s) => {
     const pale = text(s, "Pale", { name: "Pale", color: "#CCCCCC" });

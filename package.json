@@ -1,6 +1,6 @@
 {
   "name": "figma-mcp-bridge",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "MCP server that lets AI agents design in Figma through a local plugin bridge (no Figma REST API, no access token).",
   "private": true,
   "type": "module",
