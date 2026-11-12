@@ -1134,6 +1134,9 @@ export function createMockFigma(options = {}) {
         mode.name = newName;
       },
       addMode(modeName) {
+        // Observed in Figma on plans with a mode limit.
+        const maxModes = options.maxModes ?? Infinity;
+        if (this.modes.length >= maxModes) throw new Error(`in addMode: Limited to ${maxModes} modes only`);
         const id = `${counter++}:0`;
         this.modes.push({ modeId: id, name: modeName });
         return id;

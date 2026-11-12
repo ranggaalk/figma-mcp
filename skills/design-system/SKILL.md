@@ -60,19 +60,25 @@ for (const [name, hex] of Object.entries({ "gray/0": "#FFFFFF", "gray/900": "#1F
 const theme = figma.variables.createVariableCollection("Theme");
 const light = theme.modes[0].modeId;
 theme.renameMode(light, "Light");
-const dark = theme.addMode("Dark"); // some Figma plans limit modes; if this throws, keep one mode
+let dark;
+try {
+  dark = theme.addMode("Dark");
+} catch (err) {
+  // Some Figma plans allow only one mode per collection ("Limited to 1 modes only").
+  // Continue with Light only and tell the user that Dark mode needs a plan with more modes.
+}
 const alias = (v) => figma.variables.createVariableAlias(v);
 const token = (name, scopes, lightValue, darkValue) => {
   const v = figma.variables.createVariable(name, theme, "COLOR");
   v.scopes = scopes;
   v.setValueForMode(light, alias(lightValue));
-  v.setValueForMode(dark, alias(darkValue));
+  if (dark) v.setValueForMode(dark, alias(darkValue));
   return v;
 };
 token("bg/surface", ["FRAME_FILL", "SHAPE_FILL"], raw["gray/0"], raw["gray/900"]);
 token("text/primary", ["TEXT_FILL"], raw["gray/900"], raw["gray/0"]);
 token("accent/default", ["ALL_FILLS", "STROKE_COLOR"], raw["blue/500"], raw["blue/300"]);
-return { primitives: prim.id, theme: theme.id };
+return { primitives: prim.id, theme: theme.id, darkMode: Boolean(dark) };
 ```
 
 ### Spacing and radius
@@ -132,8 +138,13 @@ Afterwards, run `get_styles` to confirm the result.
    ```
 
 3. **Other property types**:
-   - Optional parts: `const show = set.addComponentProperty("Show icon", "BOOLEAN", false)`, then on the layer `componentPropertyReferences = { visible: show }`.
-   - Swappable icons: `const icon = set.addComponentProperty("Icon", "INSTANCE_SWAP", iconComponent.id)`, then on the nested icon *instance* `componentPropertyReferences = { mainComponent: icon }`.
+   - Optional parts: `const show = set.addComponentProperty("Show icon", "BOOLEAN", false)`, bound to the layer's `visible`.
+   - Swappable icons: `const icon = set.addComponentProperty("Icon", "INSTANCE_SWAP", iconComponent.id)`, bound to the nested icon *instance*'s `mainComponent`.
+   - Assigning `componentPropertyReferences` **replaces** the whole object, so a second assignment drops the first binding. Set them together, or merge:
+
+     ```js
+     layer.componentPropertyReferences = { ...layer.componentPropertyReferences, visible: show, mainComponent: icon };
+     ```
 4. **States as variants**: Default, Hover, Focus, Pressed and Disabled for anything interactive; Error for inputs; sizes such as S, M, L when needed. The Focus variant needs a visible ring (see `get_skill` with name `accessibility`).
 5. **Describe the rules** in `description`: when to use it, when not to, and limits ("one per view").
 6. **Verify**: `get_components` should show the properties and variant options. Then place one with `build_design` (`type: "instance"`, `variant`, `props`) to check it behaves.

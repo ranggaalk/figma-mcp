@@ -78,7 +78,7 @@ test("the design-system recipes run as written", async () => {
   try {
     const skill = readFileSync(join(ROOT, "skills", "design-system", "SKILL.md"), "utf8");
     const blocks = [...skill.matchAll(/^[ \t]*```js\n([\s\S]*?)^[ \t]*```/gm)].map((m) => m[1]);
-    assert.equal(blocks.length, 4, "primitives/theme, dimensions, styles, components");
+    assert.equal(blocks.length, 5, "primitives/theme, dimensions, styles, components, property bindings");
 
     for (const code of blocks.slice(0, 3)) {
       const result = await server.call("execute_code", { code });
@@ -123,6 +123,38 @@ test("the design-system recipes run as written", async () => {
       spec: { type: "instance", component: "Button", variant: { Kind: "Secondary" }, props: { Label: "Save" } },
     });
     assert.equal(placed.isError, undefined, textOf(placed));
+
+    // Found in Figma: assigning componentPropertyReferences replaces the object,
+    // so the skill's binding line must keep the existing references.
+    const bindings = await server.call("execute_code", {
+      code: [
+        `const set = await figma.getNodeByIdAsync("${set.id}");`,
+        'const show = set.addComponentProperty("Show icon", "BOOLEAN", false);',
+        `const icon = set.addComponentProperty("Icon", "INSTANCE_SWAP", "${primary}");`,
+        'const layer = set.children[0].findOne((n) => n.name === "Label");',
+        blocks[4],
+        "return layer.componentPropertyReferences;",
+      ].join("\n"),
+    });
+    assert.equal(bindings.isError, undefined, textOf(bindings));
+    assert.deepEqual(Object.keys(jsonOf(bindings).result).sort(), ["characters", "mainComponent", "visible"]);
+  } finally {
+    await plugin.close();
+  }
+});
+
+test("the theme recipe still works on plans that allow one mode", async () => {
+  // Found in Figma: addMode throws "Limited to 1 modes only" on some plans.
+  const figma = createMockFigma({ maxModes: 1 });
+  const plugin = await connectPlugin({ port: PORT, figma });
+  try {
+    const skill = readFileSync(join(ROOT, "skills", "design-system", "SKILL.md"), "utf8");
+    const theme = [...skill.matchAll(/^[ \t]*```js\n([\s\S]*?)^[ \t]*```/gm)][0][1];
+    const result = await server.call("execute_code", { code: theme });
+    assert.equal(result.isError, undefined, textOf(result));
+    assert.equal(jsonOf(result).result.darkMode, false);
+    const styles = jsonOf(await server.call("get_styles"));
+    assert.deepEqual(styles.variableCollections.find((c) => c.name === "Theme").modes.map((m) => m.name), ["Light"]);
   } finally {
     await plugin.close();
   }
