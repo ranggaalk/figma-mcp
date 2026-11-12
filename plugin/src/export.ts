@@ -1,7 +1,7 @@
 // Rendering nodes to PNG.
 
-import type { ExportResult } from "../../src/protocol";
-import { requireNode, round, withTimeout } from "./util";
+import type { ExportResult, ScreenshotResult } from "../../src/protocol";
+import { errorMessage, isApiObject, requireNode, round, withTimeout } from "./util";
 
 const EXPORT_LIMIT_MS = 45000;
 const EXPORT_LIMIT_HIDDEN_MS = 8000;
@@ -23,6 +23,40 @@ export function setWindowHidden(hidden: boolean): void {
 
 export function isWindowHidden(): boolean {
   return windowHidden;
+}
+
+/** The frame directly on the page that contains `node`, so a screenshot shows the change in context. */
+export function topLevelOf(node: SceneNode): SceneNode {
+  let current: SceneNode = node;
+  while (current.parent && current.parent.type !== "PAGE" && current.parent.type !== "DOCUMENT") {
+    current = current.parent as SceneNode;
+  }
+  return current;
+}
+
+/** First scene node found in a value returned by agent code (the value itself, or inside arrays/objects). */
+export function findNodeIn(value: unknown, depth = 0): SceneNode | undefined {
+  if (isApiObject(value) && typeof (value as any).exportAsync === "function" && (value as any).type !== "PAGE") {
+    return value as SceneNode;
+  }
+  if (depth >= 2 || typeof value !== "object" || value === null) return undefined;
+  const items = Array.isArray(value) ? value : Object.keys(value).map((key) => (value as any)[key]);
+  for (const item of items) {
+    const found = findNodeIn(item, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** A screenshot to send along with a tool result. Never throws: problems become `skipped`. */
+export async function screenshotOf(node: SceneNode | undefined): Promise<ScreenshotResult> {
+  if (!node || node.removed) return { skipped: "There was no node to capture." };
+  if (windowHidden) return { skipped: "The Figma window is hidden, so Figma is not rendering. " + HIDDEN_WINDOW_HELP };
+  try {
+    return await exportNode({ nodeId: node.id, scale: 1, maxSize: 1600 });
+  } catch (err) {
+    return { skipped: errorMessage(err) };
+  }
 }
 
 /** Size of everything on a page, which has no width or height of its own. */

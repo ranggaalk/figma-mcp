@@ -23,9 +23,17 @@ export interface CommandParams {
   get_styles: { includeVariables: boolean };
   export_node: { nodeId?: string; scale: number; maxSize: number };
   /** `compiled` defines `__figmaBridgeMain`, produced by the server's compileSnippet. */
-  execute_code: { compiled: string; timeoutMs: number };
+  execute_code: { compiled: string; timeoutMs: number; screenshot?: boolean };
   save_checkpoint: { title: string; description?: string };
+  build_design: { spec: unknown; parentId?: string; index?: number; screenshot?: boolean };
+  update_nodes: { updates: unknown; screenshot?: boolean };
 }
+
+/** Time limit for build_design and update_nodes inside the plugin. */
+export const BUILD_TIMEOUT_MS = 60000;
+
+/** Attached to results of commands called with `screenshot: true`. */
+export type ScreenshotResult = ExportResult | { skipped: string };
 
 /** The server waits this much longer than a mutation's own time limit, so the plugin's rollback message arrives. */
 export const PLUGIN_TIMEOUT_MARGIN_MS = 2000;

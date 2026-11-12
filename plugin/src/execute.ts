@@ -1,5 +1,6 @@
 // Running agent-written code (execute_code).
 
+import { createHelpers } from "./helpers";
 import { MAX_TEXT_CHARS, toPlain } from "./serialize";
 import { errorMessage, safe, type Json } from "./util";
 
@@ -20,11 +21,11 @@ function captureConsole(logs: string[]): Json {
   return { log: method("log"), info: method("info"), warn: method("warn"), error: method("error"), debug: method("debug") };
 }
 
-type SnippetMain = (api: PluginAPI, console: Json) => Promise<unknown>;
+type SnippetMain = (api: PluginAPI, console: Json, h: ReturnType<typeof createHelpers>) => Promise<unknown>;
 
 /**
  * `compiled` is produced by the MCP server and defines `__figmaBridgeMain`,
- * an async function taking `(figma, console)`.
+ * an async function taking `(figma, console, h)`.
  */
 function loadSnippet(compiled: string): SnippetMain {
   const source = compiled + "\nreturn __figmaBridgeMain;";
@@ -37,16 +38,22 @@ function loadSnippet(compiled: string): SnippetMain {
   }
 }
 
+export interface ExecuteOutcome {
+  /** What the agent's code returned, still as live objects (for screenshots). */
+  raw: unknown;
+  json: Json;
+}
+
 /** Runs inside runMutation, which makes the call one undo step and rolls it back on failure. */
-export async function executeCode(params: { compiled: string }): Promise<Json> {
+export async function executeCode(params: { compiled: string }): Promise<ExecuteOutcome> {
   if (typeof params.compiled !== "string") throw new Error("No code was provided");
   const logs: string[] = [];
   try {
     const main = loadSnippet(params.compiled);
-    const result = await main(figma, captureConsole(logs));
+    const result = await main(figma, captureConsole(logs), createHelpers());
     const out: Json = { result: toPlain(result) };
     if (logs.length > 0) out.logs = logs;
-    return out;
+    return { raw: result, json: out };
   } catch (err) {
     let message = errorMessage(err);
     if (logs.length > 0) message += "\nconsole output before the error:\n" + logs.join("\n");

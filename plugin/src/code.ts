@@ -2,9 +2,10 @@
 // sandbox, which has the `figma` API but no network access. The UI iframe
 // (ui.html) owns the WebSocket and relays messages to and from this file.
 
-import { PLUGIN_VERSION, type CommandMessage, type CommandName, type CommandParams } from "../../src/protocol";
+import { BUILD_TIMEOUT_MS, PLUGIN_VERSION, type CommandMessage, type CommandName, type CommandParams } from "../../src/protocol";
+import { buildDesign, describeCreated, updateNodes } from "./builder";
 import { executeCode } from "./execute";
-import { exportNode, isWindowHidden, setWindowHidden } from "./export";
+import { exportNode, findNodeIn, isWindowHidden, screenshotOf, setWindowHidden, topLevelOf } from "./export";
 import { runMutation } from "./mutation";
 import { MAX_CHILDREN, serializeEffect, serializeNode, serializePaints, serializeVariableValue, summarize } from "./serialize";
 import { clampDepth, errorMessage, requireNode, type Json } from "./util";
@@ -72,8 +73,38 @@ const handlers: Handlers = {
 
   // Commands that change the document go through runMutation: one at a time,
   // one undo step each, rolled back on failure.
-  execute_code: (params) => runMutation(() => executeCode(params), params.timeoutMs),
+  execute_code: async (params) => {
+    const outcome = await runMutation(() => executeCode(params), params.timeoutMs);
+    if (params.screenshot) {
+      const node = findNodeIn(outcome.raw) || figma.currentPage.selection[0];
+      outcome.json.screenshot = await screenshotOf(node && topLevelOf(node));
+    }
+    return outcome.json;
+  },
+
   save_checkpoint: (params) => runMutation(() => saveCheckpoint(params), 60000),
+
+  build_design: async (params) => {
+    const built = await runMutation(async () => {
+      const result = await buildDesign(params);
+      // Show new top-level designs to the user.
+      if (result.root.parent === figma.currentPage) {
+        figma.currentPage.selection = [result.root];
+        figma.viewport.scrollAndZoomIntoView([result.root]);
+      }
+      return result;
+    }, BUILD_TIMEOUT_MS);
+    const out: Json = { root: summarize(built.root), ...describeCreated(built) };
+    if (params.screenshot) out.screenshot = await screenshotOf(topLevelOf(built.root));
+    return out;
+  },
+
+  update_nodes: async (params) => {
+    const nodes = await runMutation(() => updateNodes(params.updates), BUILD_TIMEOUT_MS);
+    const out: Json = { updated: nodes.map(summarize) };
+    if (params.screenshot) out.screenshot = await screenshotOf(topLevelOf(nodes[0]));
+    return out;
+  },
 };
 
 async function saveCheckpoint(params: CommandParams["save_checkpoint"]): Promise<Json> {

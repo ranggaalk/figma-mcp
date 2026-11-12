@@ -4,7 +4,15 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { FigmaBridge } from "./bridge.js";
 import { compileSnippet } from "./compile.js";
-import { DEFAULT_PORT, PLUGIN_TIMEOUT_MARGIN_MS, PLUGIN_VERSION, type ExportResult } from "./protocol.js";
+import {
+  BUILD_TIMEOUT_MS,
+  DEFAULT_PORT,
+  PLUGIN_TIMEOUT_MARGIN_MS,
+  PLUGIN_VERSION,
+  type ExportResult,
+  type ScreenshotResult,
+} from "./protocol.js";
+import { nodeSpecSchema, updatePropsSchema } from "./spec-schema.js";
 
 const PORT = Number(process.env.FIGMA_BRIDGE_PORT ?? DEFAULT_PORT);
 const HOST = process.env.FIGMA_BRIDGE_HOST ?? "127.0.0.1";
@@ -35,6 +43,27 @@ function textResult(value: unknown): ToolResult {
   return { content: [{ type: "text", text: toText(value) }] };
 }
 
+/** Like textResult, but a `screenshot` field becomes an image block. */
+function resultWithScreenshot(value: unknown): ToolResult {
+  const { screenshot, ...rest } = value as { screenshot?: ScreenshotResult } & Record<string, unknown>;
+  if (!screenshot) return textResult(rest);
+  if ("skipped" in screenshot) return textResult({ ...rest, screenshot: { skipped: screenshot.skipped } });
+  const { base64, mimeType, ...info } = screenshot;
+  return {
+    content: [
+      { type: "text", text: toText({ ...rest, screenshot: info }) },
+      { type: "image", data: base64, mimeType },
+    ],
+  };
+}
+
+const screenshotSchema = z
+  .boolean()
+  .default(false)
+  .describe(
+    "Also return a PNG of the result (the top-level frame containing it), saving a separate export_node call. Skipped with a note while the Figma window is hidden.",
+  );
+
 async function guarded(run: () => Promise<ToolResult>): Promise<ToolResult> {
   let result: ToolResult;
   try {
@@ -59,7 +88,8 @@ const server = new McpServer(
   {
     instructions: [
       "Reads and edits the Figma file the user currently has open, through a local plugin (no Figma REST API).",
-      "Typical loop: get_status to confirm the connection → get_document_info / get_selection / get_node / get_styles to understand the file → execute_code to create or change the design → export_node to look at the result and fix what is off.",
+      "Typical loop: get_status to confirm the connection → get_document_info / get_selection / get_node / get_styles to understand the file → build_design to create screens and components, update_nodes to change existing nodes → look at the screenshot (screenshot: true) and fix what is off.",
+      "Use execute_code only for what build_design and update_nodes cannot express (loops over many nodes, component variants, reading data); inside it, the `h` helpers give the same builder.",
       "Reuse the file's existing styles, variables and components instead of hard-coding values when they exist.",
       "Before changing a design that already existed (not one you just created), call save_checkpoint so the user can restore it from Figma's version history.",
       "Every call that changes the document is one undo step for the user, and is rolled back automatically if it fails.",
@@ -192,9 +222,16 @@ server.registerTool(
   {
     title: "Run Plugin API code in Figma",
     description: [
-      "Run JavaScript (or TypeScript) against the Figma Plugin API in the open file. This is how you create and edit designs.",
+      "Run JavaScript (or TypeScript) against the Figma Plugin API in the open file. Prefer build_design and update_nodes; use this for what they cannot express.",
       "",
       "The code is the body of an async function: use `await` freely and `return` a value to get it back. `figma` is the Plugin API global. `console.log` output is returned too. Returned nodes come back as {id, name, type, x, y, width, height}; return the ids of what you create so you can inspect or export them afterwards.",
+      "",
+      "`h` holds builder helpers that handle fonts and sizing rules for you:",
+      "- `await h.build(spec, { parent?, index? })` creates nodes from a build_design spec and returns the root node.",
+      "- `await h.apply(nodeOrId, props)` changes a node with update_nodes props.",
+      "- `await h.setText(nodeOrId, 'text')` replaces text after loading the fonts it uses.",
+      "- `await h.font('Inter', 600)` resolves and loads a font, returning its FontName.",
+      "- `h.paint('#4F46E5')` returns a fills/strokes array; `h.color('#4F46E5')` returns { r, g, b }.",
       "",
       "Rules of the Plugin API that commonly cause errors:",
       "- Load fonts before changing text: `await figma.loadFontAsync({ family: 'Inter', style: 'Regular' })`, then set `fontName` and `characters`.",
@@ -208,7 +245,7 @@ server.registerTool(
       "Each call is one undo step in Figma. If the code throws or times out, every change it made is rolled back automatically, so the file is unchanged and you can fix the code and run it again. Prefer several small calls over one very large script.",
     ].join("\n"),
     inputSchema: {
-      code: z.string().describe("Body of an async function. `figma` and `console` are in scope."),
+      code: z.string().describe("Body of an async function. `figma`, `h` and `console` are in scope."),
       timeoutMs: z
         .number()
         .int()
@@ -216,17 +253,95 @@ server.registerTool(
         .max(300_000)
         .default(30_000)
         .describe("How long to wait for the code to finish."),
+      screenshot: screenshotSchema.describe(
+        "Also return a PNG of the top-level frame containing the first node the code returns (or the selection).",
+      ),
     },
     annotations: { readOnlyHint: false, destructiveHint: true },
   },
-  ({ code, timeoutMs }) =>
+  ({ code, timeoutMs, screenshot }) =>
     guarded(async () => {
       if (!bridge.connected) throw new Error(bridge.notConnectedMessage());
       const compiled = await compileSnippet(code);
-      return textResult(
-        await bridge.request("execute_code", { compiled, timeoutMs }, timeoutMs + PLUGIN_TIMEOUT_MARGIN_MS),
+      return resultWithScreenshot(
+        await bridge.request("execute_code", { compiled, timeoutMs, screenshot }, timeoutMs + PLUGIN_TIMEOUT_MARGIN_MS),
       );
     }),
+);
+
+server.registerTool(
+  "build_design",
+  {
+    title: "Build a design from a spec",
+    description: [
+      "Create a frame (screen, card, component…) and everything inside it from one JSON spec, in a single undo step. The whole spec is checked before anything is created; errors name the exact path, e.g. spec.children[2].fill.",
+      "",
+      "Node types: frame (auto layout by default), component, text, rect, ellipse, line (divider) and svg (icons).",
+      "Frames are vertical auto layout unless layout says otherwise, and hug their content; use width/height \"fill\" to stretch inside an auto-layout parent. Fonts are loaded for you (default Inter, size 16).",
+      "Without parentId the result is placed in empty space on the current page, selected and scrolled into view. With parentId it is added inside that frame (at index, or last).",
+      "",
+      "Example:",
+      '{"type":"frame","name":"Card","width":360,"padding":24,"gap":12,"fill":"#FFFFFF","radius":16,"stroke":"#E2E8F0","shadow":{"y":4,"blur":16,"color":"#0F172A14"},"children":[',
+      ' {"type":"text","text":"Upgrade to Pro","size":20,"weight":600,"color":"#0F172A"},',
+      ' {"type":"text","text":"Unlimited projects and priority support.","width":"fill","color":"#475569","lineHeight":1.5},',
+      ' {"type":"line","fill":"#E2E8F0"},',
+      ' {"type":"frame","layout":"horizontal","width":"fill","align":"end","gap":8,"children":[',
+      '  {"type":"frame","name":"Button","padding":[10,16],"radius":8,"fill":"#4F46E5","children":[{"type":"text","text":"Upgrade","weight":600,"color":"#FFFFFF"}]}]}]}',
+      "",
+      "Returns the ids of the created nodes by spec path, for later update_nodes calls.",
+    ].join("\n"),
+    inputSchema: {
+      spec: nodeSpecSchema,
+      parentId: z.string().optional().describe("Frame (or page) to add the result to. Default: the current page."),
+      index: z.number().int().min(0).optional().describe("Position among the parent's children. Default: last."),
+      screenshot: screenshotSchema,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  ({ spec, parentId, index, screenshot }) =>
+    guarded(async () =>
+      resultWithScreenshot(
+        await bridge.request(
+          "build_design",
+          { spec, parentId: parentId ? normalizeNodeId(parentId) : undefined, index, screenshot },
+          BUILD_TIMEOUT_MS + PLUGIN_TIMEOUT_MARGIN_MS,
+        ),
+      ),
+    ),
+);
+
+server.registerTool(
+  "update_nodes",
+  {
+    title: "Change existing nodes",
+    description: [
+      "Change properties of existing nodes using the build_design format, in a single undo step. All updates are checked before any is applied.",
+      "Which props apply depends on the node: frames take layout/gap/padding/align/fill/stroke/radius/shadow…, text takes text/spans/font/weight/size/color/align…, shapes take fill/stroke/radius. width/height/name/x/y/opacity/visible work on all.",
+      'Example: {"updates":[{"nodeId":"12:34","props":{"fill":"#F8FAFC","padding":[16,24]}},{"nodeId":"12:40","props":{"text":"Save changes","weight":600}}]}',
+    ].join("\n"),
+    inputSchema: {
+      updates: z
+        .array(
+          z.object({
+            nodeId: z.string().describe('Node id such as "12:34".'),
+            props: updatePropsSchema,
+          }),
+        )
+        .min(1),
+      screenshot: screenshotSchema,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  ({ updates, screenshot }) =>
+    guarded(async () =>
+      resultWithScreenshot(
+        await bridge.request(
+          "update_nodes",
+          { updates: updates.map((u) => ({ ...u, nodeId: normalizeNodeId(u.nodeId) })), screenshot },
+          BUILD_TIMEOUT_MS + PLUGIN_TIMEOUT_MARGIN_MS,
+        ),
+      ),
+    ),
 );
 
 server.registerTool(

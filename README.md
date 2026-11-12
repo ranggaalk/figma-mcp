@@ -41,8 +41,32 @@ Agent ⇄ MCP (stdio) ⇄ dist/server.js ⇄ WebSocket localhost:3055 ⇄ plugin
 | `get_node` | Detail satu node berdasarkan id |
 | `get_styles` | Style lokal (warna, teks, efek) dan variable |
 | `export_node` | Render node ke PNG supaya agent bisa melihat hasilnya |
-| `execute_code` | Menjalankan kode Plugin API untuk membuat dan mengubah desain |
+| `build_design` | Membuat frame beserta seluruh isinya dari satu spec JSON |
+| `update_nodes` | Mengubah properti node yang sudah ada dengan format yang sama |
+| `execute_code` | Menjalankan kode Plugin API untuk hal yang tidak bisa diungkapkan lewat spec |
 | `save_checkpoint` | Menyimpan versi bernama ke version history file |
+
+`build_design`, `update_nodes`, dan `execute_code` menerima `screenshot: true` untuk langsung mengembalikan PNG hasilnya.
+
+### Builder (`build_design` / `update_nodes`)
+
+Satu spec menggambarkan satu pohon node:
+
+```json
+{"type":"frame","name":"Card","width":360,"padding":24,"gap":12,"fill":"#FFFFFF","radius":16,"children":[
+  {"type":"text","text":"Upgrade to Pro","size":20,"weight":600},
+  {"type":"text","text":"Unlimited projects.","width":"fill","color":"#475569","lineHeight":1.5},
+  {"type":"line","fill":"#E2E8F0"}
+]}
+```
+
+- Tipe node: `frame` (auto layout vertikal bawaan), `component`, `text`, `rect`, `ellipse`, `line`, dan `svg`.
+- Ukuran berupa angka, `"fill"`, atau `"hug"`. Builder mengurus urutan yang diwajibkan Figma, misalnya `layoutMode` sebelum anak ditempel dan `FILL` sesudahnya.
+- Font dimuat otomatis, termasuk font lama saat teks diubah. Bobot boleh angka (`600`) atau nama style.
+- Seluruh spec divalidasi sebelum ada node dibuat. Error menyebut lokasinya, misalnya `spec.children[2].fill: "blue-500" is not a color`, dan menyarankan nama properti yang benar (`backgroundColor` → `fill`).
+- Tanpa `parentId`, hasil ditaruh di ruang kosong di kanan konten yang ada.
+
+Di dalam `execute_code`, objek `h` menyediakan builder yang sama: `h.build`, `h.apply`, `h.setText`, `h.font`, `h.paint`, dan `h.color`.
 
 Kode untuk `execute_code` diturunkan ke ES2017 di server sebelum dikirim, jadi agent boleh memakai sintaks modern atau TypeScript.
 

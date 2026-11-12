@@ -16,7 +16,7 @@ export async function compileSnippet(code: string): Promise<string> {
         " Remove the call and try again.",
     );
   }
-  const wrapped = `var __figmaBridgeMain = async function (figma, console) {\n${code}\n};`;
+  const wrapped = `var __figmaBridgeMain = async function (figma, console, h) {\n${code}\n};`;
   try {
     const { code: compiled } = await transform(wrapped, { loader: "ts", target: "es2017" });
     return compiled;
