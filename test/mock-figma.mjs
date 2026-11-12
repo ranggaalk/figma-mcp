@@ -962,8 +962,8 @@ export function createMockFigma(options = {}) {
     }
     if (sizing === "HUG") {
       if (node.type === "TEXT") {
-        const wrap = node._p.textAutoResize === "HEIGHT" || node._p.sizingH !== "HUG" ? computeSize(node, "h", guard) : undefined;
         if (axis === "h") return textNaturalSize(node).width;
+        const wrap = node._p.sizingH === "HUG" ? undefined : computeSize(node, "h", guard);
         return textNaturalSize(node, wrap).height;
       }
       if (isAutoLayout(node)) {

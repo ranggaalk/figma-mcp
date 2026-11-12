@@ -2,7 +2,7 @@
 // Keep this file free of Node and Figma APIs: types and constants only.
 
 /** Version of the plugin this server was built with. Both sides must match. */
-export const PLUGIN_VERSION = "0.3.0";
+export const PLUGIN_VERSION = "0.4.0";
 
 export const DEFAULT_PORT = 3055;
 
@@ -24,6 +24,8 @@ export interface CommandParams {
   get_components: { query?: string; limit: number; includeUsed: boolean };
   /** Keys, names and properties of this file's components and styles, for save_library_catalog. */
   library_snapshot: Record<string, never>;
+  check_design: { nodeId?: string; maxIssues: number; minSeverity: "error" | "warning" | "info" };
+  find_nodes: { query?: string; text?: string; types?: string[]; withinNodeId?: string; allPages: boolean; limit: number };
   place_image: {
     base64: string;
     name: string;

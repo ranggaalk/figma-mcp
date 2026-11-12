@@ -92,6 +92,7 @@ const server = new McpServer(
       "Reads and edits the Figma file the user currently has open, through a local plugin (no Figma REST API).",
       "Typical loop: get_status to confirm the connection → get_document_info / get_selection / get_node / get_styles to understand the file → build_design to create screens and components, update_nodes to change existing nodes → look at the screenshot (screenshot: true) and fix what is off.",
       "Use execute_code only for what build_design and update_nodes cannot express (loops over many nodes, component variants, reading data); inside it, the `h` helpers give the same builder.",
+      "build_design and update_nodes report layout and contrast problems they find in a `check` field; fix them before moving on. Run check_design on a finished screen (or on an existing design you are asked to tidy) for the full report, and find_nodes to locate layers in large files.",
       "Reuse the file's design system instead of hard-coding values: get_styles lists styles and variables, get_components lists components. In specs, bind colors and spacing with { \"variable\": \"name\" } or { \"style\": \"name\" }, text with textStyle, and place components with type \"instance\".",
       "Before changing a design that already existed (not one you just created), call save_checkpoint so the user can restore it from Figma's version history.",
       "Every call that changes the document is one undo step for the user, and is rolled back automatically if it fails.",
@@ -186,6 +187,67 @@ server.registerTool(
       if (includeLibraries) styles.libraryCatalogStyles = await catalogStyles();
       return textResult(styles);
     }),
+);
+
+server.registerTool(
+  "check_design",
+  {
+    title: "Check a design for problems",
+    description: [
+      "Inspect a frame (and everything in it) for common problems, each with the node id, its layer path and a suggested fix:",
+      "- error: text that does not fit its fixed box, fonts that are not installed",
+      "- warning: content cut off by a clipping frame or sticking out of its auto-layout parent, auto-layout frames left at Figma's 100 px default size, text contrast below WCAG AA, colors equal to a design token but not linked to it",
+      "- info: colors outside the file's palette, text without a text style, default layer names (\"Frame 12\")",
+      "Contents of component instances are checked in their main component.",
+    ].join("\n"),
+    inputSchema: {
+      nodeId: z.string().optional().describe("Frame to check. Default: the first selected node."),
+      minSeverity: z.enum(["error", "warning", "info"]).default("info").describe("Leave out less severe issues."),
+      maxIssues: z.number().int().min(1).max(200).default(50),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  ({ nodeId, minSeverity, maxIssues }) =>
+    guarded(async () =>
+      textResult(
+        await bridge.request(
+          "check_design",
+          { nodeId: nodeId ? normalizeNodeId(nodeId) : undefined, minSeverity, maxIssues },
+          120_000,
+        ),
+      ),
+    ),
+);
+
+server.registerTool(
+  "find_nodes",
+  {
+    title: "Find layers",
+    description:
+      "Search for layers by name, by text content and/or by type, on the current page, inside one node, or across all pages. Returns ids, layer paths and positions, which is cheaper than reading whole trees in large files.",
+    inputSchema: {
+      query: z.string().optional().describe("Part of the layer name (case-insensitive)."),
+      text: z.string().optional().describe("Part of the text content; matches text layers only."),
+      types: z
+        .array(z.string())
+        .optional()
+        .describe('Node types such as ["FRAME", "TEXT", "INSTANCE", "COMPONENT"].'),
+      withinNodeId: z.string().optional().describe("Only search inside this node."),
+      allPages: z.boolean().default(false).describe("Search every page instead of the current one."),
+      limit: z.number().int().min(1).max(500).default(50),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  ({ query, text, types, withinNodeId, allPages, limit }) =>
+    guarded(async () =>
+      textResult(
+        await bridge.request(
+          "find_nodes",
+          { query, text, types, withinNodeId: withinNodeId ? normalizeNodeId(withinNodeId) : undefined, allPages, limit },
+          120_000,
+        ),
+      ),
+    ),
 );
 
 server.registerTool(

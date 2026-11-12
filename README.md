@@ -43,6 +43,8 @@ Agent ⇄ MCP (stdio) ⇄ dist/server.js ⇄ WebSocket localhost:3055 ⇄ plugin
 | `get_components` | Komponen dan component set beserta properti dan variant-nya, komponen library yang sudah dipakai, dan isi katalog library |
 | `save_library_catalog` | Menyimpan key komponen dan style file library ini, supaya bisa dipakai dari file lain |
 | `place_image` | Memasukkan file PNG/JPEG/GIF sebagai rectangle baru atau sebagai fill node |
+| `find_nodes` | Mencari layer berdasarkan nama, isi teks, atau tipe, di satu node, halaman ini, atau semua halaman |
+| `check_design` | Memeriksa frame: teks terpotong, konten terpotong, ukuran bawaan 100px, kontras rendah, warna di luar token, dan lainnya |
 | `export_node` | Render node ke PNG supaya agent bisa melihat hasilnya |
 | `build_design` | Membuat frame beserta seluruh isinya dari satu spec JSON |
 | `update_nodes` | Mengubah properti node yang sudah ada dengan format yang sama |
@@ -97,6 +99,18 @@ Plugin API tidak bisa melihat isi library, tapi bisa mengimpor berdasarkan key.
 - **Komponen library yang sudah dipakai di file** langsung terdeteksi dari instance-nya.
 
 Kode untuk `execute_code` diturunkan ke ES2017 di server sebelum dikirim, jadi agent boleh memakai sintaks modern atau TypeScript.
+
+### Pemeriksaan desain
+
+`check_design` memeriksa sebuah frame beserta isinya. Setiap temuan menyebut id node, jalur layer, dan saran perbaikan.
+
+| Tingkat | Aturan |
+| --- | --- |
+| error | teks tidak muat di kotaknya; font tidak terpasang |
+| warning | konten terpotong oleh frame yang meng-clip; anak keluar dari parent auto layout; frame auto layout masih 100px bawaan; kontras teks di bawah WCAG AA; warna sama dengan token tapi tidak terhubung |
+| info | warna di luar palet file; teks tanpa text style; nama layer bawaan ("Frame 12") |
+
+`build_design` dan `update_nodes` otomatis menjalankan pemeriksaan ini dan melaporkan error dan warning di field `check`, jadi agent bisa langsung memperbaikinya.
 
 ### Keamanan
 

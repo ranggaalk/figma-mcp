@@ -4,6 +4,8 @@
 
 import { BUILD_TIMEOUT_MS, PLUGIN_VERSION, type CommandMessage, type CommandName, type CommandParams } from "../../src/protocol";
 import { buildDesign, describeCreated, updateNodes } from "./builder";
+import { checkDesign, quickCheck } from "./checks";
+import { findNodes } from "./find";
 import { executeCode } from "./execute";
 import { exportNode, findNodeIn, isWindowHidden, screenshotOf, setWindowHidden, topLevelOf } from "./export";
 import { placeImage } from "./images";
@@ -74,6 +76,16 @@ const handlers: Handlers = {
   get_components: getComponents,
   library_snapshot: librarySnapshot,
   export_node: exportNode,
+  find_nodes: findNodes,
+
+  check_design: async (params) => {
+    let root: BaseNode | undefined;
+    if (params.nodeId) root = await requireNode(params.nodeId);
+    else root = figma.currentPage.selection[0];
+    if (!root) throw new Error("Nothing is selected in Figma. Pass a nodeId, or ask the user to select a frame.");
+    if (root.type === "DOCUMENT" || root.type === "PAGE") throw new Error("Check a frame or another node, not a whole page.");
+    return (await checkDesign(root as SceneNode, params.maxIssues, params.minSeverity)).json;
+  },
 
   // Commands that change the document go through runMutation: one at a time,
   // one undo step each, rolled back on failure.
@@ -99,6 +111,8 @@ const handlers: Handlers = {
       return result;
     }, BUILD_TIMEOUT_MS);
     const out: Json = { root: summarize(built.root), ...describeCreated(built) };
+    const problems = await quickCheck([built.root]);
+    if (problems) out.check = problems;
     if (params.screenshot) out.screenshot = await screenshotOf(topLevelOf(built.root));
     return out;
   },
@@ -106,6 +120,8 @@ const handlers: Handlers = {
   update_nodes: async (params) => {
     const nodes = await runMutation(() => updateNodes(params.updates), BUILD_TIMEOUT_MS);
     const out: Json = { updated: nodes.map(summarize) };
+    const problems = await quickCheck(nodes.map(topLevelOf));
+    if (problems) out.check = problems;
     if (params.screenshot) out.screenshot = await screenshotOf(topLevelOf(nodes[0]));
     return out;
   },
