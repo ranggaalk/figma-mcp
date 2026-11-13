@@ -58,6 +58,8 @@ Then compare the plan with the brief and with the list below, and change anythin
 - Name layers by role ("Header", "Plan usage", "Primary action"). Generic "Frame" names make the file hard to work with later.
 - Common screen sizes: 1440 wide for desktop, 390 for mobile. Let the height hug the content unless you are showing a single viewport.
 - Inside the screen, use auto layout throughout. `width: "fill"` for content that should stretch; `align: "space-between"` to push items to opposite edges; absolute positioning only for overlays.
+- For overlays and marks that sit on an edge (an active-tab bar, a badge on a corner, a rule mark), use `absolute: true` with `x`, `y` and `constraints`, for example `{ "horizontal": "stretch", "vertical": "bottom" }`, so they follow the frame when its size changes.
+- A frame's border takes layout space: in an auto-layout frame built here, a 1px stroke moves the children in by 1px. Adding 1px padding as well puts everything 2px in, which shows as marks sitting off their lines.
 - **Spacing rhythm**: take values from the spacing scale, and keep gaps inside a group smaller than gaps between groups (for example 8 inside a field, 16 between fields, 32 between sections).
 - **Type**: stay within the file's text styles. Body text reads best at 45 to 80 characters per line.
 - **States**: for screens that show data, consider the empty, loading and error versions, and what happens with very long values.
@@ -81,6 +83,7 @@ If the Figma window is hidden, screenshots are skipped. Say that the visual chec
 - Call `save_checkpoint` before changing a design you did not just create.
 - Prefer `update_nodes` for targeted changes, and keep the rest of the screen as it is unless asked.
 - When turning on auto layout for an existing frame, also set width and height ("hug" to fit the content), or the cross axis keeps its old size and can cut content off.
+- To reuse a section from another screen, copy it with `h.clone(node, { parent })` in `execute_code`, not `node.clone()`. A plain clone moved into a frame with another variable mode (a Dark screen's section into a Light screen) keeps the colours of the mode it came from. `check_design` reports this as `stale-variable`; `h.refreshVariables(node)` repairs copies that already have it.
 
 ## 7. Report
 

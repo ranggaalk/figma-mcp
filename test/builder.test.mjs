@@ -319,6 +319,81 @@ test("h helpers in execute_code use the same builder", async () => {
   assert.match(textOf(bad), /spec\.colour: unknown property/);
 });
 
+test("absolute children take constraints, by the names Figma's panel uses", async () => {
+  const built = await server.call("build_design", {
+    spec: {
+      type: "frame",
+      name: "Tab",
+      layout: "horizontal",
+      padding: [8, 16],
+      children: [
+        { type: "text", text: "Usage plans" },
+        { type: "rect", name: "Active bar", absolute: true, x: 0, y: 34, width: 60, height: 2, fill: "#0969DA", constraints: { horizontal: "stretch", vertical: "bottom" } },
+      ],
+    },
+  });
+  assert.equal(built.isError, undefined, textOf(built));
+  const bar = figma.currentPage.findOne((n) => n.name === "Active bar");
+  assert.equal(bar.layoutPositioning, "ABSOLUTE");
+  assert.deepEqual([bar.x, bar.y, bar.width], [0, 34, 60]);
+  assert.deepEqual(bar.constraints, { horizontal: "STRETCH", vertical: "MAX" });
+
+  // update_nodes changes one axis and keeps the other.
+  const updated = await server.call("update_nodes", { updates: [{ nodeId: bar.id, props: { constraints: { horizontal: "left" } } }] });
+  assert.equal(updated.isError, undefined, textOf(updated));
+  assert.deepEqual(bar.constraints, { horizontal: "MIN", vertical: "MAX" });
+
+  // Frames without auto layout position by x/y, so constraints apply there too.
+  const free = await server.call("build_design", {
+    spec: { type: "frame", name: "Canvas", layout: "none", width: 200, height: 100, children: [{ type: "rect", name: "Pinned", x: 150, y: 10, width: 40, height: 40, constraints: { horizontal: "right" } }] },
+  });
+  assert.equal(free.isError, undefined, textOf(free));
+  assert.deepEqual(figma.currentPage.findOne((n) => n.name === "Pinned").constraints, { horizontal: "MAX", vertical: "MIN" });
+
+  const before = pageCount();
+  const inFlow = await server.call("build_design", { spec: { type: "frame", children: [{ type: "rect", width: 10, height: 10, constraints: { horizontal: "stretch" } }] } });
+  assert.match(textOf(inFlow), /spec\.children\[0\]\.constraints: the parent has auto layout.*absolute: true/);
+  const wrongAxis = await server.call("build_design", {
+    spec: { type: "frame", layout: "none", width: 100, height: 100, children: [{ type: "rect", width: 10, height: 10, constraints: { horizontal: "top" } }] },
+  });
+  assert.match(textOf(wrongAxis), /constraints\.horizontal: must be one of "left", "right", "center", "stretch", "scale", got "top"/);
+  const synonym = await server.call("build_design", { spec: { type: "frame", layout: "none", width: 100, height: 100, children: [{ type: "rect", width: 10, height: 10, pin: { horizontal: "right" } }] } });
+  assert.match(textOf(synonym), /spec\.children\[0\]\.pin: unknown property.*did you mean "constraints"/);
+  assert.equal(pageCount(), before, "nothing is created when the spec is wrong");
+});
+
+test("h.annotate adds notes and keeps the ones already there", async () => {
+  const frame = figma._test.setup(() => {
+    const f = figma.createFrame();
+    f.name = "Pricing";
+    return f;
+  });
+  const result = await server.call("execute_code", {
+    code: [
+      `await h.annotate("${frame.id}", "Tokens = **floor(amount / rate)**", "development");`,
+      `const node = await h.annotate("${frame.id}", "Render as a table", "Accessibility");`,
+      `await h.annotate(node, "No category");`,
+      "return node.annotations.map((a) => [a.labelMarkdown, a.categoryId || null]);",
+    ].join("\n"),
+  });
+  assert.equal(result.isError, undefined, textOf(result));
+  assert.deepEqual(jsonOf(result).result, [
+    ["Tokens = **floor(amount / rate)**", "1:0"],
+    ["Render as a table", "1:2"],
+    ["No category", null],
+  ]);
+
+  // Why the helper exists: Figma returns `label` next to `labelMarkdown` but refuses both when writing.
+  const naive = await server.call("execute_code", {
+    code: `const n = await figma.getNodeByIdAsync("${frame.id}"); n.annotations = [...n.annotations, { labelMarkdown: "x" }];`,
+  });
+  assert.match(textOf(naive), /Only one of label or labelMarkdown should be given/);
+
+  const unknown = await server.call("execute_code", { code: `await h.annotate("${frame.id}", "x", "Legal");` });
+  assert.match(textOf(unknown), /no annotation category "Legal"\. This file has: Development, Interaction, Accessibility, Content/);
+  assert.equal(frame.annotations.length, 3, "failed calls leave the notes as they were");
+});
+
 test("screenshot: true returns an image, or a note while Figma is hidden", async () => {
   const result = await server.call("build_design", { spec: CARD, screenshot: true });
   assert.ok(imageOf(result), "image block");

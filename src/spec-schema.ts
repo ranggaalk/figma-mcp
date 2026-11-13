@@ -64,6 +64,15 @@ const props = {
   x: z.number().optional().describe("Position in a parent without auto layout, or with absolute: true."),
   y: z.number().optional(),
   absolute: z.boolean().optional().describe("Take the node out of its auto-layout flow and place it at x/y."),
+  constraints: z
+    .looseObject({
+      horizontal: z.enum(["left", "right", "center", "stretch", "scale"]).optional(),
+      vertical: z.enum(["top", "bottom", "center", "stretch", "scale"]).optional(),
+    })
+    .optional()
+    .describe(
+      'How an absolute child (or a child of a layout "none" frame) follows its parent when that is resized, e.g. {"horizontal":"stretch","vertical":"bottom"} for a bar along the bottom edge. Default left/top.',
+    ),
   opacity: z.number().optional().describe("0 to 1."),
   visible: z.boolean().optional(),
 

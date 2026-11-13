@@ -32,7 +32,7 @@ type Kind = "frame" | "component" | "text" | "rect" | "ellipse" | "line" | "svg"
 
 // ------------------------------------------------------------------ keys
 
-const COMMON_KEYS = ["name", "width", "height", "x", "y", "absolute", "opacity", "visible"];
+const COMMON_KEYS = ["name", "width", "height", "x", "y", "absolute", "constraints", "opacity", "visible"];
 const BOX_KEYS = ["fill", "stroke", "strokeWeight", "radius", "shadow", "effectStyle"];
 const FRAME_KEYS = ["layout", "gap", "padding", "align", "crossAlign", "wrap", "rowGap", "clip"];
 const TEXT_KEYS = [
@@ -76,7 +76,7 @@ const UPDATE_KEYS: Record<Kind, string[]> = {
   line: [...COMMON_KEYS, ...without(BOX_KEYS, "radius")],
   shape: [...COMMON_KEYS, ...without(BOX_KEYS, "radius")],
   svg: [...COMMON_KEYS],
-  group: without(COMMON_KEYS, "width", "height"),
+  group: without(COMMON_KEYS, "width", "height", "constraints"),
 };
 
 function kindOfNode(node: BaseNode): Kind | undefined {
@@ -142,6 +142,8 @@ const SYNONYMS: Record<string, string> = {
   variants: "variant",
   properties: "props",
   overrides: "texts",
+  pin: "constraints",
+  constraint: "constraints",
 };
 
 function checkKeys(object: Record<string, unknown>, allowed: string[], path: string, what: string): void {
@@ -204,6 +206,11 @@ const DECORATION: Record<string, "NONE" | "UNDERLINE" | "STRIKETHROUGH"> = {
   strikethrough: "STRIKETHROUGH",
 };
 const SCALE_MODES: Record<string, "FILL" | "FIT" | "CROP" | "TILE"> = { fill: "FILL", fit: "FIT", crop: "CROP", tile: "TILE" };
+/** How a node follows its parent's edges when the parent is resized. */
+const CONSTRAINTS: Record<"horizontal" | "vertical", Record<string, ConstraintType>> = {
+  horizontal: { left: "MIN", right: "MAX", center: "CENTER", stretch: "STRETCH", scale: "SCALE" },
+  vertical: { top: "MIN", bottom: "MAX", center: "CENTER", stretch: "STRETCH", scale: "SCALE" },
+};
 
 function lineHeight(value: unknown, path: string): LineHeight {
   if (value === "auto") return { unit: "AUTO" };
@@ -390,6 +397,7 @@ interface Plan {
   x?: number;
   y?: number;
   absolute?: boolean;
+  constraints?: { horizontal?: ConstraintType; vertical?: ConstraintType };
   opacity?: number;
   visible?: boolean;
   fills?: PaintPlan;
@@ -480,6 +488,18 @@ function planCommon(spec: Record<string, any>, plan: Plan, ctx: Context): void {
     plan[axis] = number(spec[axis], `${path}.${axis}`);
     if (ctx.parentLayout !== "NONE" && !absolute) {
       fail(`${path}.${axis}`, "the parent has auto layout, which positions this node; set absolute: true to place it freely");
+    }
+  }
+  if (spec.constraints !== undefined) {
+    const at = `${path}.constraints`;
+    if (!isObject(spec.constraints)) fail(at, 'must be an object such as { "horizontal": "stretch", "vertical": "bottom" }');
+    checkKeys(spec.constraints, ["horizontal", "vertical"], at, "constraints");
+    if (ctx.parentLayout !== "NONE" && !absolute) {
+      fail(at, "the parent has auto layout, which positions this node; constraints apply with absolute: true, or inside a frame with layout \"none\"");
+    }
+    plan.constraints = {};
+    for (const axis of ["horizontal", "vertical"] as const) {
+      if (spec.constraints[axis] !== undefined) plan.constraints[axis] = oneOf(spec.constraints[axis], CONSTRAINTS[axis], `${at}.${axis}`);
     }
   }
 }
@@ -1206,6 +1226,13 @@ function applyPosition(node: SceneNode, plan: Plan): void {
   if (plan.y !== undefined) node.y = plan.y;
 }
 
+/** After size and position, so the offsets Figma keeps are the final ones. */
+function applyConstraints(node: SceneNode, plan: Plan): void {
+  if (!plan.constraints || !("constraints" in node)) return;
+  const target = node as SceneNode & ConstraintMixin;
+  target.constraints = { ...target.constraints, ...plan.constraints };
+}
+
 async function buildPlan(
   plan: Plan,
   parent: Container,
@@ -1223,6 +1250,7 @@ async function buildPlan(
   applySize(node, plan, isAutoLayout(parent) && parent.type !== "PAGE" && !plan.absolute);
   if (plan.x !== undefined) node.x = plan.x;
   if (plan.y !== undefined) node.y = plan.y;
+  applyConstraints(node, plan);
   created.push({ path: plan.path, id: node.id, name: node.name, type: node.type });
   for (const child of plan.children || []) await buildPlan(child, node as FrameNode, undefined, resources, created);
   return node;
@@ -1312,6 +1340,7 @@ export async function updateNodes(
     applyPosition(node, plan);
     const parent = node.parent;
     applySize(node, plan, !!parent && parent.type !== "PAGE" && isAutoLayout(parent) && (node as any).layoutPositioning !== "ABSOLUTE");
+    applyConstraints(node, plan);
   }
   return items.map((item) => item.node);
 }

@@ -229,6 +229,149 @@ test("design-token rules only apply when the file has tokens", async () => {
   }
 });
 
+test("finds copies that kept the colors of another variable mode; h.refreshVariables and h.clone fix it", async () => {
+  // Found in Figma: clone() a node out of a Dark frame into a Light one and it stays dark,
+  // in `fills` and on screen, although its variable binding is intact.
+  let theme;
+  const made = [];
+  const ids = figma._test.setup(() => {
+    theme = figma._test.makeCollection("Theme");
+    const light = theme.modes[0].modeId;
+    theme.renameMode(light, "Light");
+    const dark = theme.addMode("Dark");
+    const variable = (name, lightHex, darkHex) => {
+      const v = figma._test.makeVariable(name, theme, "COLOR");
+      v.setValueForMode(light, { ...figma.util.rgb(lightHex), a: 1 });
+      v.setValueForMode(dark, { ...figma.util.rgb(darkHex), a: 1 });
+      made.push(v);
+      return v;
+    };
+    const bg = variable("bg/canvas", "#FFFFFF", "#0D1117");
+    const fg = variable("text/primary", "#1F2328", "#E6EDF3");
+    const bind = (v) => [figma.variables.setBoundVariableForPaint(figma.util.solidPaint("#000000"), "color", v)];
+
+    const darkFrame = figma.createFrame();
+    darkFrame.name = "Landing (dark)";
+    darkFrame.resize(400, 300);
+    darkFrame.fills = bind(bg);
+    darkFrame.setExplicitVariableModeForCollection(theme, dark);
+    const card = figma.createFrame();
+    card.name = "Card";
+    card.resize(300, 120);
+    card.fills = bind(bg);
+    darkFrame.appendChild(card);
+    for (const [i, words] of ["Capacity from people", "not only providers"].entries()) {
+      const t = text(card, words, { name: `Line ${i + 1}` });
+      t.fills = bind(fg);
+      t.y = i * 30;
+    }
+    const lightFrame = figma.createFrame();
+    lightFrame.name = "Landing V2 (light)";
+    lightFrame.resize(400, 300);
+    lightFrame.x = 500;
+    lightFrame.fills = bind(bg);
+    return { dark: darkFrame.id, card: card.id, light: lightFrame.id };
+  });
+  const hexOf = async (id) => {
+    const node = await figma.getNodeByIdAsync(id);
+    const { r, g, b } = node.fills[0].color;
+    return "#" + [r, g, b].map((c) => Math.round(c * 255).toString(16).padStart(2, "0")).join("").toUpperCase();
+  };
+  try {
+    assert.equal(await hexOf(ids.card), "#0D1117", "bound colors follow the frame's mode");
+    assert.ok(!rules(await check(ids.dark)).includes("stale-variable"));
+
+    const cloned = await server.call("execute_code", {
+      code: `const card = await figma.getNodeByIdAsync("${ids.card}"); const copy = card.clone(); (await figma.getNodeByIdAsync("${ids.light}")).appendChild(copy); return copy;`,
+    });
+    const copyId = jsonOf(cloned).result.id;
+    assert.equal(await hexOf(copyId), "#0D1117", "the copy still has the dark color");
+    const stale = (await check(ids.light)).issues.filter((i) => i.rule === "stale-variable");
+    assert.equal(stale.length, 1, "one report for the subtree, not one per layer");
+    assert.equal(stale[0].nodeId, copyId);
+    assert.equal(stale[0].severity, "warning");
+    assert.match(stale[0].message, /Fill is bound to variable "bg\/canvas" but still shows #0D1117; in this frame's mode the variable is #FFFFFF/);
+    assert.match(stale[0].suggestion, /h\.refreshVariables/);
+
+    const refreshed = await server.call("execute_code", { code: `return await h.refreshVariables("${copyId}");` });
+    assert.equal(jsonOf(refreshed).result, 1, "one collection with more than one mode");
+    assert.equal(await hexOf(copyId), "#FFFFFF");
+    assert.deepEqual((await figma.getNodeByIdAsync(copyId)).explicitVariableModes, {}, "no explicit mode is left behind");
+    assert.ok(!rules(await check(ids.light)).includes("stale-variable"));
+
+    // h.clone does both steps, into another parent or next to the original.
+    const safe = await server.call("execute_code", {
+      code: [
+        `const moved = await h.clone("${ids.card}", { parent: "${ids.light}", index: 0 });`,
+        `const beside = await h.clone("${ids.card}");`,
+        "return { moved: moved.id, movedIndex: moved.parent.children.indexOf(moved), beside: beside.id, besideIndex: beside.parent.children.indexOf(beside) };",
+      ].join("\n"),
+    });
+    assert.equal(safe.isError, undefined, textOf(safe));
+    const out = jsonOf(safe).result;
+    assert.equal(out.movedIndex, 0);
+    assert.equal(out.besideIndex, 1, "right after the original");
+    assert.equal(await hexOf(out.moved), "#FFFFFF");
+    assert.equal(await hexOf(out.beside), "#0D1117", "a copy in the same frame keeps that frame's mode");
+    assert.ok(!rules(await check(ids.light)).includes("stale-variable"));
+
+    // A frame with its own explicit mode gets that mode back after the refresh.
+    const pinned = await server.call("execute_code", {
+      code: `const n = await figma.getNodeByIdAsync("${ids.dark}"); await h.refreshVariables(n); return n.explicitVariableModes;`,
+    });
+    assert.deepEqual(Object.values(jsonOf(pinned).result), [theme.modes[1].modeId]);
+    assert.equal(await hexOf(ids.card), "#0D1117");
+  } finally {
+    figma._test.setup(() => {
+      for (const v of made) v.remove();
+      theme.remove();
+    });
+  }
+});
+
+test("finds layers that ended up completely outside their frame", async () => {
+  const ids = screen((s) => {
+    const win = figma.createFrame();
+    win.name = "Window";
+    win.layoutMode = "VERTICAL";
+    win.resize(200, 100);
+    win.clipsContent = false;
+    s.appendChild(win);
+    const place = (name, x, y, w = 200, h = 20) => {
+      const r = figma.createRectangle();
+      r.name = name;
+      win.appendChild(r);
+      r.layoutPositioning = "ABSOLUTE";
+      r.resize(w, h);
+      r.x = x;
+      r.y = y;
+      return r.id;
+    };
+    const lost = place("Highlight", 200, 10); // starts exactly where the frame ends
+    place("Badge", 180, -8, 40, 16); // overlaps the corner on purpose
+    place("Inside", 10, 10, 50, 20);
+
+    const clip = figma.createFrame();
+    clip.name = "Viewport";
+    clip.resize(100, 100);
+    clip.x = 250;
+    clip.clipsContent = true;
+    s.appendChild(clip);
+    const hidden = figma.createRectangle();
+    hidden.name = "Offscreen";
+    clip.appendChild(hidden);
+    hidden.x = 140;
+    return { lost, hidden: hidden.id };
+  });
+  const report = await check(ids.screen);
+  const outside = report.issues.filter((i) => i.rule === "outside-parent");
+  assert.deepEqual(outside.map((i) => i.nodeId), [ids.lost]);
+  assert.match(outside[0].message, /Lies completely outside its parent "Window"/);
+  const clipped = report.issues.filter((i) => i.rule === "clipped");
+  assert.deepEqual(clipped.map((i) => i.nodeId), [ids.hidden]);
+  assert.match(clipped[0].message, /Hidden: it lies completely outside "Viewport"/);
+});
+
 test("default layer names are reported, instance contents are not", async () => {
   const ids = screen((s) => {
     const unnamed = figma.createFrame();

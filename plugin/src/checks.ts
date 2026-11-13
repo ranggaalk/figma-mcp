@@ -32,6 +32,8 @@ interface Tokens {
   colors: Record<string, string[]>;
   hasColorTokens: boolean;
   hasTextStyles: boolean;
+  /** Local color variables by id, to compare what a paint shows with what its variable resolves to. */
+  variables: Record<string, Variable>;
 }
 
 async function loadTokens(): Promise<Tokens> {
@@ -45,12 +47,14 @@ async function loadTokens(): Promise<Tokens> {
     if (style.paints.length === 1 && paint.type === "SOLID") add(colorToHex(paint.color), `style "${style.name}"`);
   }
   const variables = await figma.variables.getLocalVariablesAsync("COLOR");
+  const byId: Record<string, Variable> = {};
   for (const variable of variables) {
+    byId[variable.id] = variable;
     const value = variable.valuesByMode[Object.keys(variable.valuesByMode)[0]] as any;
     if (value && typeof value.r === "number") add(colorToHex({ r: value.r, g: value.g, b: value.b }), `variable "${variable.name}"`);
   }
   const textStyles = await figma.getLocalTextStylesAsync();
-  return { colors, hasColorTokens: paintStyles.length + variables.length > 0, hasTextStyles: textStyles.length > 0 };
+  return { colors, hasColorTokens: paintStyles.length + variables.length > 0, hasTextStyles: textStyles.length > 0, variables: byId };
 }
 
 function boxOf(node: SceneNode, render = false): Box | null {
@@ -64,6 +68,16 @@ function sticksOut(child: Box, parent: Box): boolean {
     child.y < parent.y - TOLERANCE ||
     child.x + child.width > parent.x + parent.width + TOLERANCE ||
     child.y + child.height > parent.y + parent.height + TOLERANCE
+  );
+}
+
+/** No part of the child is inside the parent. A zero-size side (a line) may sit on the far edge. */
+function liesOutside(child: Box, parent: Box): boolean {
+  return (
+    child.x + Math.max(child.width, 1) <= parent.x ||
+    child.y + Math.max(child.height, 1) <= parent.y ||
+    (child.width > 0 ? child.x >= parent.x + parent.width : child.x > parent.x + parent.width) ||
+    (child.height > 0 ? child.y >= parent.y + parent.height : child.y > parent.y + parent.height)
   );
 }
 
@@ -120,6 +134,7 @@ class Checker {
   constructor(
     private readonly root: SceneNode,
     private readonly tokens: Tokens,
+    private readonly options: CheckOptions,
   ) {}
 
   private pathOf(node: SceneNode): string {
@@ -138,18 +153,51 @@ class Checker {
   }
 
   run(): void {
-    this.visit(this.root, false);
+    this.visit(this.root, false, false);
   }
 
-  private visit(node: SceneNode, insideInstance: boolean): void {
+  private visit(node: SceneNode, insideInstance: boolean, staleAbove: boolean): void {
     if (node.visible === false) return;
     this.checked++;
     this.checkNode(node, insideInstance);
+    // One report per stale subtree: refreshing the top node fixes everything under it.
+    const stale = staleAbove || (this.options.stale !== false && this.checkStale(node));
     // Contents of instances come from their main component, which is checked where it is defined.
     if (node.type === "INSTANCE") return;
     if ("children" in node) {
-      for (const child of (node as FrameNode).children) this.visit(child, insideInstance);
+      for (const child of (node as FrameNode).children) this.visit(child, insideInstance, stale);
     }
+  }
+
+  /**
+   * Found in Figma: a node cloned into a frame with another variable mode keeps the
+   * colors of the mode it came from, in `fills` and on screen, although the binding is intact.
+   */
+  private checkStale(node: SceneNode): boolean {
+    const n = node as any;
+    for (const field of ["fills", "strokes"] as const) {
+      const paints = field in n ? n[field] : undefined;
+      if (!Array.isArray(paints)) continue;
+      for (const paint of paints as Paint[]) {
+        const id = paint.type === "SOLID" && paint.visible !== false && paint.boundVariables && paint.boundVariables.color ? paint.boundVariables.color.id : undefined;
+        const variable = id ? this.tokens.variables[id] : undefined;
+        if (!variable || paint.type !== "SOLID") continue;
+        const resolved = safe(() => variable.resolveForConsumer(node).value) as RGBA | undefined;
+        if (!resolved || typeof resolved.r !== "number") continue;
+        const shown = paint.color;
+        const off = Math.max(Math.abs(shown.r - resolved.r), Math.abs(shown.g - resolved.g), Math.abs(shown.b - resolved.b));
+        if (off <= 0.02) continue;
+        this.add(
+          "warning",
+          "stale-variable",
+          node,
+          `${field === "fills" ? (node.type === "TEXT" ? "Text color" : "Fill") : "Stroke"} is bound to variable "${variable.name}" but still shows ${colorToHex(shown)}; in this frame's mode the variable is ${colorToHex(resolved)}.`,
+          "Run `await h.refreshVariables(node)` on it in execute_code. Copies made with node.clone() keep the colors of the mode they came from; h.clone avoids that.",
+        );
+        return true;
+      }
+    }
+    return false;
   }
 
   private checkNode(node: SceneNode, insideInstance: boolean): void {
@@ -173,13 +221,28 @@ class Checker {
       }
     }
 
-    // Children cut off by a clipping frame, or sticking out of an auto-layout parent.
+    // Children cut off by a clipping frame, sticking out of an auto-layout parent, or not inside their frame at all.
     if ("children" in node && node.type !== "INSTANCE") {
       const box = boxOf(node);
       const clips = n.clipsContent === true;
+      const isFrame = node.type === "FRAME" || node.type === "COMPONENT" || node.type === "COMPONENT_SET";
+      const outside: Record<string, boolean> = {};
+      if (box && isFrame) {
+        for (const child of (node as FrameNode).children) {
+          if (child.visible === false || (child as any).isMask === true) continue;
+          const childBox = boxOf(child);
+          if (!childBox || !liesOutside(childBox, box)) continue;
+          outside[child.id] = true;
+          if (clips) {
+            this.add("warning", "clipped", child, `Hidden: it lies completely outside "${node.name}", which clips its content.`, "Move it inside the frame, or out of this frame if it belongs elsewhere.");
+          } else {
+            this.add("warning", "outside-parent", child, `Lies completely outside its parent "${node.name}".`, "Move it inside the frame, or out of this frame if it belongs elsewhere.");
+          }
+        }
+      }
       if (box && (clips || isAutoLayout(node))) {
         for (const child of (node as FrameNode).children) {
-          if (child.visible === false) continue;
+          if (child.visible === false || outside[child.id]) continue;
           if (!clips && (child as any).layoutPositioning === "ABSOLUTE") continue;
           // Render bounds include shadows and other effects, which may extend past
           // a parent by design; only for text do they show real overflow (glyphs).
@@ -266,14 +329,22 @@ class Checker {
   }
 }
 
+export interface CheckOptions {
+  /**
+   * Compare variable-bound paints with what their variable resolves to. Off for checks
+   * that run in the same call as a build: Figma stores the resolved color a moment later.
+   */
+  stale?: boolean;
+}
+
 export interface CheckResult {
   summary: { errors: number; warnings: number; infos: number };
   issues: Issue[];
   json: Json;
 }
 
-export async function checkDesign(root: SceneNode, maxIssues = 50, minSeverity: Severity = "info"): Promise<CheckResult> {
-  const checker = new Checker(root, await loadTokens());
+export async function checkDesign(root: SceneNode, maxIssues = 50, minSeverity: Severity = "info", options: CheckOptions = {}): Promise<CheckResult> {
+  const checker = new Checker(root, await loadTokens(), options);
   checker.run();
   const all = checker.issues
     .filter((issue) => SEVERITY_ORDER[issue.severity] <= SEVERITY_ORDER[minSeverity])
@@ -295,7 +366,7 @@ export async function quickCheck(roots: SceneNode[]): Promise<Json | undefined> 
   for (const root of roots) {
     if (seen[root.id] || root.removed) continue;
     seen[root.id] = true;
-    issues.push(...(await checkDesign(root, 10, "warning")).issues);
+    issues.push(...(await checkDesign(root, 10, "warning", { stale: false })).issues);
   }
   if (issues.length === 0) return undefined;
   return {

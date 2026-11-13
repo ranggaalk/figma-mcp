@@ -80,8 +80,13 @@ Satu spec menggambarkan satu pohon node:
 - **Font:** dimuat otomatis, termasuk font lama saat teks diubah. Bobot boleh angka (`600`) atau nama style.
 - **Validasi:** seluruh spec diperiksa sebelum ada node dibuat. Error menyebut lokasinya, misalnya `spec.children[2].fill: "blue-500" is not a color`, dan menyarankan nama properti yang benar (`backgroundColor` → `fill`).
 - **Penempatan:** tanpa `parentId`, hasil ditaruh di ruang kosong di kanan konten yang ada; dengan `parentId` (dan opsional `index`), hasil disisipkan ke frame itu.
+- **Layer bebas:** `absolute: true` dengan `x`, `y` mengeluarkan node dari alur auto layout. `constraints` (`left`/`right`/`center`/`stretch`/`scale` dan `top`/`bottom`/…) mengatur cara node mengikuti parent saat ukurannya berubah, misalnya `{ "horizontal": "stretch", "vertical": "bottom" }` untuk bar di tepi bawah.
 
-`execute_code` tetap tersedia untuk hal yang butuh logika. Kodenya diturunkan ke ES2017 di server, jadi agent boleh memakai sintaks modern atau TypeScript. Di dalamnya, objek `h` menyediakan builder yang sama: `h.build`, `h.apply`, `h.setText`, `h.font`, `h.paint`, dan `h.color`.
+`execute_code` tetap tersedia untuk hal yang butuh logika. Kodenya diturunkan ke ES2017 di server, jadi agent boleh memakai sintaks modern atau TypeScript. Di dalamnya, objek `h` menyediakan builder yang sama: `h.build`, `h.apply`, `h.setText`, `h.font`, `h.paint`, dan `h.color`. Tiga helper lain menutup jebakan Figma yang sering kena:
+
+- `h.clone(node, { parent, index })`: menyalin node. Pakai ini, bukan `node.clone()`, saat salinan masuk ke frame dengan mode variable lain (misalnya dari layar Dark ke layar Light). Salinan biasa tetap membawa warna mode asalnya.
+- `h.refreshVariables(node)`: meminta Figma menghitung ulang warna yang terikat variable pada node dan isinya. Ini perbaikan untuk temuan `stale-variable`.
+- `h.annotate(node, "catatan **markdown**", "Development")`: menambah anotasi Dev Mode tanpa menghapus yang sudah ada.
 
 ### Design system
 
@@ -148,10 +153,12 @@ Teks skill ditulis untuk project ini. Sumber ide dan lisensinya tercantum di `sk
 | Tingkat | Aturan |
 | --- | --- |
 | error | teks tidak muat di kotaknya; font tidak terpasang |
-| warning | konten terpotong oleh frame yang meng-clip; anak keluar dari parent auto layout; frame auto layout masih 100px bawaan; kontras teks di bawah WCAG AA; warna sama dengan token tapi tidak terhubung |
+| warning | konten terpotong oleh frame yang meng-clip; anak keluar dari parent auto layout; layer berada sepenuhnya di luar frame-nya; frame auto layout masih 100px bawaan; kontras teks di bawah WCAG AA; warna sama dengan token tapi tidak terhubung; salinan yang masih menampilkan warna mode variable lain (`stale-variable`) |
 | info | warna di luar palet file; teks tanpa text style; nama layer bawaan ("Frame 12") |
 
-`build_design` dan `update_nodes` otomatis menjalankan pemeriksaan ini dan melaporkan error dan warning di field `check`, jadi agent bisa langsung memperbaikinya. Isi instance diperiksa di komponen utamanya.
+`build_design` dan `update_nodes` otomatis menjalankan pemeriksaan ini dan melaporkan error dan warning di field `check`, jadi agent bisa langsung memperbaikinya. Isi instance diperiksa di komponen utamanya. Aturan `stale-variable` hanya jalan di `check_design`, karena Figma baru menyimpan warna hasil variable sesaat setelah sebuah panggilan selesai.
+
+Catatan teknis untuk `stale-variable`: di Figma, node hasil `clone()` yang langsung dipindah ke frame bermode lain tetap menyimpan warna mode asalnya, baik di `fills` maupun di layar, walau ikatan variable-nya utuh. Memasang ulang paint yang sama tidak membantu. Menyetel mode eksplisit lalu mengembalikannya membuat Figma menghitung ulang seluruh isi node; itulah yang dilakukan `h.refreshVariables`.
 
 ### Keamanan
 

@@ -60,6 +60,12 @@ export function createMockFigma(options = {}) {
   const newId = () => `${session}:${counter++}`;
   const newKey = () => createHash("sha1").update(String(Math.random()) + counter++).digest("hex");
 
+  const annotationCategories = options.annotationCategories ?? [
+    { id: "1:0", label: "Development", color: "blue", isPreset: true },
+    { id: "1:1", label: "Interaction", color: "violet", isPreset: true },
+    { id: "1:2", label: "Accessibility", color: "teal", isPreset: true },
+    { id: "1:3", label: "Content", color: "yellow", isPreset: true },
+  ];
   const availableFonts = new Set((options.fonts ?? DEFAULT_FONTS).map(([family, style]) => `${family}|${style}`));
   const loadedFonts = new Set();
   const stats = { undos: 0, commits: 0, versions: [], fontLoads: 0 };
@@ -198,6 +204,10 @@ export function createMockFigma(options = {}) {
       if (oldParent) oldParent._children.splice(oldIndex, 1);
       this._children.splice(Math.min(index, this._children.length), 0, child);
       child._parent = this;
+      // Found in Figma: a node moved into a frame with another variable mode takes
+      // that mode's colours, but a fresh clone keeps the ones it was copied with.
+      if (child._freshClone) child._freshClone = false;
+      else reresolve(child);
       // Leaving an auto-layout parent turns FILL into FIXED, as in Figma.
       const keepSizing = { h: child._p.sizingH, v: child._p.sizingV };
       if (!isAutoLayout(this)) {
@@ -390,7 +400,60 @@ export function createMockFigma(options = {}) {
       set(this, "effectStyleId", id);
     },
     clone() {
-      return cloneNode(this);
+      const copy = cloneNode(this);
+      copy._freshClone = true;
+      return copy;
+    },
+    get constraints() {
+      return clone(this._p.constraints ?? { horizontal: "MIN", vertical: "MIN" });
+    },
+    set constraints(value) {
+      const allowed = ["MIN", "CENTER", "MAX", "STRETCH", "SCALE"];
+      for (const axis of ["horizontal", "vertical"]) {
+        if (!value || !allowed.includes(value[axis])) {
+          throw new Error(`in set_constraints: Property "constraints" failed validation: Invalid enum value at .${axis}`);
+        }
+      }
+      set(this, "constraints", { horizontal: value.horizontal, vertical: value.vertical });
+    },
+    get explicitVariableModes() {
+      return clone(this._p.explicitModes ?? {});
+    },
+    get resolvedVariableModes() {
+      const out = {};
+      for (const collection of collections.values()) out[collection.id] = modeFor(this, collection.id);
+      return out;
+    },
+    setExplicitVariableModeForCollection(collection, modeId) {
+      const target = collections.get(collection?.id);
+      if (!target) throw new Error("in setExplicitVariableModeForCollection: expected a VariableCollection");
+      if (!target.modes.some((m) => m.modeId === modeId)) throw new Error(`in setExplicitVariableModeForCollection: no mode ${modeId} in "${target.name}"`);
+      set(this, "explicitModes", { ...(this._p.explicitModes ?? {}), [target.id]: modeId });
+      reresolve(this);
+    },
+    clearExplicitVariableModeForCollection(collection) {
+      const target = collections.get(collection?.id);
+      if (!target) throw new Error("in clearExplicitVariableModeForCollection: expected a VariableCollection");
+      const next = { ...(this._p.explicitModes ?? {}) };
+      delete next[target.id];
+      set(this, "explicitModes", next);
+      reresolve(this);
+    },
+    get annotations() {
+      // As in Figma: a markdown note reads back with a plain `label` as well.
+      return (this._p.annotations ?? []).map((a) => (a.labelMarkdown ? { ...clone(a), label: a.labelMarkdown.replace(/[*`_]/g, "") } : clone(a)));
+    },
+    set annotations(value) {
+      if (!Array.isArray(value)) throw new Error('in set_annotations: Property "annotations" failed validation: Expected an array');
+      value.forEach((a, index) => {
+        if (a.label !== undefined && a.labelMarkdown !== undefined) {
+          throw new Error(`in set_annotations: Property "annotations" failed validation: Only one of label or labelMarkdown should be given. at index ${index}`);
+        }
+        if (a.categoryId !== undefined && !annotationCategories.some((c) => c.id === a.categoryId)) {
+          throw new Error(`in set_annotations: Invalid categoryId "${a.categoryId}" at index ${index}`);
+        }
+      });
+      set(this, "annotations", clone(value));
     },
   }));
 
@@ -403,7 +466,7 @@ export function createMockFigma(options = {}) {
     },
     set fills(value) {
       if (!Array.isArray(value)) throw new Error("in set_fills: Expected an array of paints");
-      set(this, "fills", clone(value));
+      set(this, "fills", settle(this, "fills", value));
       set(this, "fillStyleId", "");
       if (this.type === "TEXT") this._rangeFills = [];
     },
@@ -412,7 +475,7 @@ export function createMockFigma(options = {}) {
     },
     set strokes(value) {
       if (!Array.isArray(value)) throw new Error("in set_strokes: Expected an array of paints");
-      set(this, "strokes", clone(value));
+      set(this, "strokes", settle(this, "strokes", value));
       set(this, "strokeStyleId", "");
     },
     get fillStyleId() {
@@ -1161,12 +1224,55 @@ export function createMockFigma(options = {}) {
       setValueForMode(modeId, value) {
         this.valuesByMode[modeId] = clone(value);
       },
+      resolveForConsumer(node) {
+        return { value: clone(resolveFor(this, node)), resolvedType: this.resolvedType };
+      },
       remove() {
         variables.delete(this.id);
       },
     };
     variables.set(variable.id, variable);
     return variable;
+  }
+
+  /** The mode a node uses for a collection: the nearest explicit one, else the collection's default. */
+  function modeFor(node, collectionId) {
+    for (let n = node; n; n = n._parent) {
+      const explicit = n._p?.explicitModes?.[collectionId];
+      if (explicit) return explicit;
+    }
+    return collections.get(collectionId)?.defaultModeId;
+  }
+  function resolveFor(variable, node) {
+    let current = variable;
+    for (let depth = 0; current && depth < 10; depth++) {
+      let value = current.valuesByMode[modeFor(node, current.variableCollectionId)];
+      if (value === undefined) value = Object.values(current.valuesByMode)[0];
+      if (value && value.type === "VARIABLE_ALIAS") current = variables.get(value.id);
+      else return value;
+    }
+    return undefined;
+  }
+  const resolvePaint = (paint, node) => {
+    const variable = paint?.boundVariables?.color ? variables.get(paint.boundVariables.color.id) : undefined;
+    const value = variable ? resolveFor(variable, node) : undefined;
+    return value && typeof value.r === "number" ? { ...paint, color: { r: value.r, g: value.g, b: value.b } } : paint;
+  };
+  /** Stored colours of bound paints, for this node and everything in it, in the modes that now apply. */
+  function reresolve(node) {
+    for (const key of ["fills", "strokes"]) {
+      if (Array.isArray(node._p?.[key])) node._p[key] = node._p[key].map((paint) => resolvePaint(paint, node));
+    }
+    for (const child of node._children ?? []) reresolve(child);
+  }
+  /**
+   * Found in Figma: assigning paints that differ from the current ones resolves their
+   * variables for the node's mode; assigning the same paints again changes nothing.
+   */
+  function settle(node, key, value) {
+    const next = clone(value);
+    if (JSON.stringify(next) === JSON.stringify(node._p[key])) return next;
+    return next.map((paint) => resolvePaint(paint, node));
   }
 
   function resolveVariableValue(variable) {
@@ -1334,6 +1440,11 @@ export function createMockFigma(options = {}) {
         set_._children.push(variant);
       }
       return set_;
+    },
+    annotations: {
+      async getAnnotationCategoriesAsync() {
+        return annotationCategories.map((c) => ({ ...c }));
+      },
     },
     variables: {
       async getLocalVariableCollectionsAsync() {
